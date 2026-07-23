@@ -1,0 +1,55 @@
+[
+  {
+    "id": 1007757,
+    "title": "Yerime Geç",
+    "poster_path": "/qOGVmgnIO71nIffkGmGtGmhHLdN.jpg",
+    "poster_url": "https://image.tmdb.org/t/p/w342/qOGVmgnIO71nIffkGmGtGmhHLdN.jpg",
+    "overview": "Ormanda yaşayan küçük bir canlıyla görkemli bir kuşun bedenleri aniden yer değiştirir ve böylece hayatlarının en çılgın macerasından sağ çıkabilmek için birlik olmaları gerekir.",
+    "vote_average": 8.91,
+    "release_date": "2026-05-01",
+    "genre_ids": [
+      12,
+      16,
+      10751,
+      14
+    ],
+    "content_type": "movie",
+    "added_at": "2026-07-23T12:48:24.710611"
+  },
+  {
+    "id": 1226863,
+    "title": "Süper Mario Galaksi Filmi",
+    "poster_path": "/hoA55UeOCYnO2EkX93EFa2e6g1i.jpg",
+    "poster_url": "https://image.tmdb.org/t/p/w342/hoA55UeOCYnO2EkX93EFa2e6g1i.jpg",
+    "overview": "Mario, Luigi ve arkadaşları, bu kez Mantar Krallığı’nın dışına çıkarak galaksiler arasında geçen bir yolculuğa katılır. Farklı gezegenlerde ilerleyen ekip, yeni karakterlerle karşılaşırken evrendeki dengeyi tehdit eden bir planla da yüzleşir. Bowser ve Bowser Jr.’ın kontrolü ele geçirme girişimi, Mario ve ekibini yıldızlar arası bir mücadeleye sürükler. Yol boyunca karşılarına çıkan engeller ve ittifaklar, bu kez çok daha büyük bir tehdide karşı birlikte hareket etmelerini gerektirir.",
+    "vote_average": 8.253,
+    "release_date": "2026-04-01",
+    "genre_ids": [
+      10751,
+      35,
+      12,
+      14,
+      16
+    ],
+    "content_type": "movie",
+    "added_at": "2026-07-23T12:48:35.115335"
+  },
+  {
+    "id": 1315772,
+    "title": "Minyonlar ve Canavarlar",
+    "poster_path": "/hNXw1I4GmLCbSdbnduoR7SVY8Jv.jpg",
+    "poster_url": "https://image.tmdb.org/t/p/w342/hNXw1I4GmLCbSdbnduoR7SVY8Jv.jpg",
+    "overview": "Bu film, minyonların Hollywood'u nasıl fethettiği, film yıldızı olup her şeylerini kaybettikleri, dünyaya canavar saldıktan sonra yarattıkları kaostan dünyayı kurtarmak için nasıl bir araya geldiklerinin çılgın, saçma ve tamamen gerçek hikayesidir.",
+    "vote_average": 6.391,
+    "release_date": "2026-06-24",
+    "genre_ids": [
+      12,
+      16,
+      35,
+      10751,
+      14
+    ],
+    "content_type": "movie",
+    "added_at": "2026-07-23T12:48:42.330159"
+  }
+]
