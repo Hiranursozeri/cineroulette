@@ -17,6 +17,7 @@ class FilterConfig:
     label: str
     description: str
     genre_ids: Optional[list[int]] = field(default_factory=list)
+    keyword_ids: Optional[list[int]] = field(default_factory=list)
     min_vote_average: Optional[float] = None
     min_vote_count: Optional[int] = None
     sort_by: str = "popularity.desc"
@@ -32,6 +33,7 @@ MOOD_FILTERS: dict[str, FilterConfig] = {
         label="Ağlamalık",
         description="Duygusal, hüzünlü filmler için hazır ol.",
         genre_ids=[18],  # Drama
+        keyword_ids=[156924],  # tearjerker (TMDB'de doğrulanmış keyword ID)
         min_vote_average=7.0,
         min_vote_count=500,
     ),
@@ -40,6 +42,7 @@ MOOD_FILTERS: dict[str, FilterConfig] = {
         label="Kafa Dağıtmalık",
         description="Eğlenceli ve hafif içerikler.",
         genre_ids=[35],  # Komedi
+        keyword_ids=[304995],  # feel-good (TMDB'de doğrulanmış keyword ID)
         min_vote_average=6.0,
         min_vote_count=300,
     ),
@@ -48,6 +51,9 @@ MOOD_FILTERS: dict[str, FilterConfig] = {
         label="Heyecan Lazım",
         description="Aksiyon ve macera dolu bir macera.",
         genre_ids=[28, 12],  # Aksiyon, Macera
+        # NOT: Bu ruh hali için güvenilir/geniş bir TMDB keyword'ü
+        # doğrulayamadım (uydurmaktansa boş bırakmayı tercih ettim).
+        # Sadece tür bazlı filtreleme uygulanıyor.
         min_vote_average=6.5,
         min_vote_count=500,
     ),
@@ -56,6 +62,7 @@ MOOD_FILTERS: dict[str, FilterConfig] = {
         label="Korku Gecesi",
         description="Işıkları kapat ve arkana bakma!",
         genre_ids=[27],  # Korku
+        keyword_ids=[6152],  # supernatural (TMDB'de doğrulanmış keyword ID)
         min_vote_average=5.5,
         min_vote_count=200,
     ),
@@ -64,6 +71,7 @@ MOOD_FILTERS: dict[str, FilterConfig] = {
         label="Düşündürücü",
         description="Beyin yakan, derin hikayeler.",
         genre_ids=[18, 9648],  # Drama, Gizem
+        keyword_ids=[12565],  # psychological thriller (TMDB'de doğrulanmış keyword ID)
         min_vote_average=7.0,
         min_vote_count=300,
     ),

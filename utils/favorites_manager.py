@@ -59,7 +59,7 @@ class FavoritesManager:
         """
         content_id = content.get("id")
         
-        if not content_id:
+        if content_id is None:
             return False
         
         # Zaten favorilerde mi?

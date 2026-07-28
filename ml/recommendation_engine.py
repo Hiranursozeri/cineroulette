@@ -66,8 +66,10 @@ class RecommendationEngine:
         # Türler (genre_ids varsa ID'leri metin olarak ekle)
         genre_ids = content.get("genre_ids", [])
         if genre_ids:
-            # Her tür ID'sini 3 kez ekle (ağırlık artırmak için)
-            genre_str = " ".join([f"genre_{g}" for g in genre_ids] * 3)
+            # Tür eşleşmesi, düz konu/olay örgüsü metin örtüşmesinden çok
+            # daha güvenilir bir "zevk" sinyali olduğu için ağırlığını
+            # belirgin şekilde artırıyoruz.
+            genre_str = " ".join([f"genre_{g}" for g in genre_ids] * 8)
             parts.append(genre_str)
         
         return " ".join(parts)
@@ -80,78 +82,96 @@ class RecommendationEngine:
     ) -> list[dict]:
         """
         Favorilere göre en benzer içerikleri bul.
-        
+
+        ÖNEMLİ TASARIM NOTU: Önceki sürüm tüm favorileri TEK bir
+        "harmanlanmış" metin profiline karıştırıp adayları o profille
+        karşılaştırıyordu. Kullanıcının favorileri çeşitliyse (ör. hem
+        korku hem romantik komedi sevmesi), bu harmanlama sinyali
+        sulandırıyor ve her adayın benzerlik skorunu yapay olarak
+        düşürüyordu. Artık her aday, favorilerin HER BİRİYLE ayrı ayrı
+        karşılaştırılıyor ve en yüksek (en iyi eşleşen) skor alınıyor —
+        yani bir aday sadece TEK bir favoriye bile çok benziyorsa yüksek
+        puan alabiliyor.
+
         Args:
             favorites: Kullanıcının favori içerikleri
             candidate_pool: Öneri havuzu (filtrelenmiş içerikler)
             top_n: Döndürülecek öneri sayısı
-        
+
         Returns:
             Benzerlik skoruna göre sıralanmış içerik listesi
         """
         if not favorites or not candidate_pool:
             return []
-        
+
         # Favori ID'lerini al (önerilerde göstermemek için)
         favorite_ids = {fav.get("id") for fav in favorites}
-        
+
         # Adayları favori olmayanlarla filtrele
         candidates = [
-            c for c in candidate_pool 
+            c for c in candidate_pool
             if c.get("id") not in favorite_ids
         ]
-        
+
         if not candidates:
             return []
-        
-        # Favori metinlerini birleştir (tek profil vektörü)
-        favorite_texts = [
-            self._create_content_string(fav) 
-            for fav in favorites
-        ]
-        combined_favorite_text = " ".join(favorite_texts)
-        
-        # Aday metinlerini oluştur
-        candidate_texts = [
-            self._create_content_string(c) 
-            for c in candidates
-        ]
-        
-        # Boş metinleri kontrol et
-        if not combined_favorite_text.strip():
-            return candidates[:top_n]
-        
+
+        favorite_texts = [self._create_content_string(fav) for fav in favorites]
+        valid_favorite_texts = [t for t in favorite_texts if t.strip()]
+
+        candidate_texts = [self._create_content_string(c) for c in candidates]
+
         valid_candidates = []
         valid_texts = []
-        
         for c, text in zip(candidates, candidate_texts):
             if text.strip():
                 valid_candidates.append(c)
                 valid_texts.append(text)
-        
-        if not valid_texts:
+
+        if not valid_texts or not valid_favorite_texts:
             return candidates[:top_n]
-        
+
         try:
-            # TF-IDF vektörlerini oluştur
-            all_texts = [combined_favorite_text] + valid_texts
+            # TF-IDF vektörlerini favoriler + adaylar birlikte, tek bir
+            # ortak kelime dağarcığı üzerinden oluşturuyoruz.
+            all_texts = valid_favorite_texts + valid_texts
             tfidf_matrix = self.vectorizer.fit_transform(all_texts)
-            
-            # Favori profili ile adaylar arasındaki benzerliği hesapla
-            favorite_vector = tfidf_matrix[0:1]
-            candidate_vectors = tfidf_matrix[1:]
-            
-            similarities = cosine_similarity(favorite_vector, candidate_vectors)[0]
-            
-            # Benzerlik skorlarını adaylara ekle
+
+            n_fav = len(valid_favorite_texts)
+            favorite_vectors = tfidf_matrix[:n_fav]
+            candidate_vectors = tfidf_matrix[n_fav:]
+
+            # (n_candidates, n_favorites) matrisi: her adayın HER favoriye
+            # göre benzerliği. Aday başına en yüksek olanı (max) alıyoruz.
+            sim_matrix = cosine_similarity(candidate_vectors, favorite_vectors)
+            raw_scores = sim_matrix.max(axis=1)
+
             for i, candidate in enumerate(valid_candidates):
-                candidate["similarity_score"] = float(similarities[i])
-            
-            # Skora göre sırala
+                candidate["similarity_score"] = float(raw_scores[i])
+
             valid_candidates.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
-            
-            return valid_candidates[:top_n]
-        
+            top_candidates = valid_candidates[:top_n]
+
+            # GÖRÜNTÜLEME İÇİN ÖLÇEKLEME: Ham TF-IDF kosinüs benzerliği
+            # doğası gereği küçük çıkar (metinler doğal dil olduğu için
+            # kelime örtüşmesi sınırlı) — matematiksel olarak yanlış değil,
+            # ama kullanıcıya "hiçbiri benzemiyor" hissi veriyor. Sıralama
+            # zaten doğru olduğu için, bu grubun kendi iç aralığını
+            # kullanıcıya daha anlamlı gelecek bir yüzde aralığına
+            # (%35-%95) yeniden ölçekliyoruz. Bu sadece GÖSTERİM amaçlı;
+            # hangi filmin daha iyi eşleştiği bilgisini değiştirmiyor.
+            if top_candidates:
+                scores = [c["similarity_score"] for c in top_candidates]
+                lo, hi = min(scores), max(scores)
+                if hi > lo:
+                    for c in top_candidates:
+                        c["similarity_score"] = 0.35 + 0.60 * (c["similarity_score"] - lo) / (hi - lo)
+                else:
+                    for c in top_candidates:
+                        c["similarity_score"] = 0.6
+
+            return top_candidates
+
         except Exception as e:
             print(f"[ML] Öneri hesaplama hatası: {e}")
             return candidates[:top_n]

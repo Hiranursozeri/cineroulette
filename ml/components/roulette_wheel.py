@@ -18,6 +18,8 @@ from typing import Optional
 _SLICE_COLORS = [
     "#e50914", "#f5c518", "#3d5a80", "#7b2cbf",
     "#2a9d8f", "#e07a5f", "#4a4e69", "#e09f3e",
+    "#c9184a", "#457b9d", "#6a994e", "#ee6c4d",
+    "#9d4edd", "#118ab2", "#ffb703", "#8338ec",
 ]
 
 _FALLBACK_POSTER = (
@@ -40,7 +42,7 @@ def create_wheel_html(
     Dönen çark için HTML/CSS/JS oluştur.
 
     Args:
-        items: Çarkta gösterilecek içerikler (max 8)
+        items: Çarkta gösterilecek içerikler (max 20)
         wheel_id: Benzersiz çark ID'si
         winning_index: Kazanan olarak belirlenmiş dilimin indeksi (Python tarafından
             seçilir). None ise çark döner ama sabit bir sonuca kilitlenmez.
@@ -51,7 +53,7 @@ def create_wheel_html(
     Returns:
         HTML string
     """
-    items = items[:8]
+    items = items[:20]
     num_items = len(items)
 
     if num_items == 0:
@@ -99,6 +101,10 @@ def create_wheel_html(
                 box-sizing: border-box;
             }}
 
+            html, body {{
+                overflow: hidden;
+            }}
+
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 background: transparent;
@@ -110,8 +116,8 @@ def create_wheel_html(
 
             .wheel-container {{
                 position: relative;
-                width: 320px;
-                height: 320px;
+                width: 420px;
+                height: 420px;
                 margin-bottom: 20px;
             }}
 
@@ -160,8 +166,8 @@ def create_wheel_html(
 
             .center-circle {{
                 position: absolute;
-                width: 60px;
-                height: 60px;
+                width: 78px;
+                height: 78px;
                 background: linear-gradient(145deg, #e50914, #831010);
                 border-radius: 50%;
                 top: 50%;
@@ -175,8 +181,8 @@ def create_wheel_html(
             }}
 
             .center-circle svg {{
-                width: 26px;
-                height: 26px;
+                width: 32px;
+                height: 32px;
                 stroke: #fff;
                 fill: none;
                 stroke-width: 1.8;
@@ -288,11 +294,15 @@ def create_wheel_html(
                     const x = center + labelRadius * Math.sin(angleRad);
                     const y = center - labelRadius * Math.cos(angleRad);
 
+                    const fontSize = numItems > 16 ? 8 : numItems > 12 ? 9 : numItems > 8 ? 10 : 11;
+                    const maxChars = numItems > 16 ? 6 : numItems > 12 ? 7 : numItems > 8 ? 8 : 10;
+
                     const label = document.createElement('div');
                     label.className = 'slice-label';
-                    label.textContent = item.title.substring(0, 10);
+                    label.textContent = item.title.substring(0, maxChars);
                     label.style.left = x + 'px';
                     label.style.top = y + 'px';
+                    label.style.fontSize = fontSize + 'px';
                     inner.appendChild(label);
                 }});
 
@@ -316,7 +326,7 @@ def render_roulette_wheel(
     winning_index: Optional[int] = None,
     autoplay: bool = False,
     spin_seed: int = 0,
-    height: int = 560,
+    height: int = 540,
 ) -> None:
     """
     Streamlit'te çark komponentini render et.
