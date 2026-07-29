@@ -3,6 +3,7 @@ import time
 import datetime
 import base64
 import json
+import uuid
 import streamlit as st
 from typing import Optional
 
@@ -147,14 +148,39 @@ def init_ml_engine() -> RecommendationEngine:
     return RecommendationEngine()
 
 
-def init_favorites_manager() -> FavoritesManager:
-    """Favori yöneticisini başlat (her oturumda yeni)."""
-    return FavoritesManager()
+def get_or_create_session_id() -> str:
+    """
+    Her tarayıcı oturumu (ziyaretçi) için benzersiz bir kimlik üretir/döndürür.
+
+    ÖNEMLİ: Uygulama artık birden fazla gerçek kullanıcı tarafından aynı anda
+    kullanılabildiği için, favoriler/geri bildirimler bu kimliğe özel ayrı
+    dosyalarda tutulur — aksi halde tüm ziyaretçilerin verileri tek bir ortak
+    dosyada birbirinin üzerine yazılırdı.
+
+    Kimlik hem `st.session_state`'te (bu oturum boyunca) hem de URL'nin
+    query param'ında (`?sid=...`) tutulur — böylece kullanıcı sayfayı
+    yenilese (F5) bile aynı kimliğe (ve dolayısıyla aynı favori/geri
+    bildirim verisine) geri dönebilir.
+    """
+    if "session_id" not in st.session_state:
+        existing = st.query_params.get("sid")
+        if existing:
+            st.session_state["session_id"] = existing
+        else:
+            new_id = uuid.uuid4().hex[:16]
+            st.session_state["session_id"] = new_id
+            st.query_params["sid"] = new_id
+    return st.session_state["session_id"]
 
 
-def init_feedback_manager() -> FeedbackManager:
-    """İzledim/beğenmedim geri bildirim yöneticisini başlat."""
-    return FeedbackManager()
+def init_favorites_manager(session_id: str) -> FavoritesManager:
+    """Favori yöneticisini başlat (bu oturuma özel dosyayla)."""
+    return FavoritesManager(session_id=session_id)
+
+
+def init_feedback_manager(session_id: str) -> FeedbackManager:
+    """İzledim/beğenmedim geri bildirim yöneticisini başlat (bu oturuma özel dosyayla)."""
+    return FeedbackManager(session_id=session_id)
 
 
 # =============================================================================
@@ -269,6 +295,19 @@ def _discover(
             continue  # Tarihi bilinmeyen içerik, yıl filtresiyle tutarlı olmadığı için dahil edilmiyor
         if y_from <= year <= y_to:
             filtered.append(item)
+
+    # KATI TÜR FİLTRESİ: TMDB, bir filmi "Komedi" seçince bile o filmin
+    # TÜM türlerinden herhangi birinde Komedi geçiyorsa döndürür — ör.
+    # "Parazit" (Komedi, Gerilim, Dram) veya "Moana" (Animasyon, Macera,
+    # Komedi, Aile) gibi filmler, Komedi asıl/baskın türleri olmadığı halde
+    # çıkabiliyor. Bunu önlemek için, seçilen türlerden en az birinin o
+    # filmin TMDB'de listelediği BİRİNCİL (ilk) tür olmasını şart koşuyoruz.
+    if query_genre_ids:
+        genre_id_set = set(query_genre_ids)
+        filtered = [
+            item for item in filtered
+            if (item.get("genre_ids") or [None])[0] in genre_id_set
+        ]
 
     total = getattr(result, "total_results", len(filtered))
     new_result = ResultList(filtered)
@@ -1347,8 +1386,9 @@ def main():
         return
 
     ml_engine = init_ml_engine()
-    fav_manager = init_favorites_manager()
-    feedback_manager = init_feedback_manager()
+    session_id = get_or_create_session_id()
+    fav_manager = init_favorites_manager(session_id)
+    feedback_manager = init_feedback_manager(session_id)
 
     tab_home, tab_ai, tab_favorites, tab_feedback = st.tabs(
         ["🎰 Anasayfa", "🤖 AI Önerileri", "❤️ Favorilerim", "👍👎 Geri Bildirimlerim"]

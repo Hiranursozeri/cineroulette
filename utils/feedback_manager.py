@@ -4,21 +4,34 @@ Geri Bildirim Yönetimi (İzledim / Beğenmedim)
 Kullanıcının "izledim" veya "bu değildi" olarak işaretlediği içerikleri
 session state ve JSON ile kalıcı olarak yönetir. Bu içerikler, bir daha
 çarkta/kart destesinde/sonuç listesinde ve AI önerilerinde gösterilmez.
+
+ÖNEMLİ: Birden fazla gerçek kullanıcı aynı anda kullanabildiği için, bu
+veriler TEK bir ortak dosyada değil, her tarayıcı oturumuna özel AYRI bir
+dosyada tutulur (bkz. `session_id`).
 """
 
 import json
 import os
 from datetime import datetime
+from typing import Optional
 import streamlit as st
+
+_DATA_DIR = "data"
 
 
 class FeedbackManager:
     """Kullanıcının izledim/beğenmedim geri bildirimlerini yöneten sınıf."""
 
-    FEEDBACK_FILE = "user_feedback.json"
     SESSION_KEY = "feedback"  # {"watched": [...], "disliked": [...]}
 
-    def __init__(self):
+    def __init__(self, session_id: Optional[str] = None):
+        self._session_id = session_id
+        if session_id:
+            os.makedirs(_DATA_DIR, exist_ok=True)
+            self.FEEDBACK_FILE = os.path.join(_DATA_DIR, f"feedback_{session_id}.json")
+        else:
+            self.FEEDBACK_FILE = "user_feedback.json"
+
         self._init_session_state()
         self._load_from_file()
 

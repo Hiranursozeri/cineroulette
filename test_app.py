@@ -18,6 +18,7 @@ başarısız olursa, hangi özelliğin bozulduğunu adından anlayabilirsin.
 
 import os
 import sys
+import shutil
 from unittest.mock import patch
 
 import pytest
@@ -64,17 +65,29 @@ def streamlit_onbellegini_temizle():
 
 @pytest.fixture(autouse=True)
 def temiz_favoriler_dosyasi():
-    """Her testten önce ve sonra favoriler/geri bildirim dosyalarını temizler (testler birbirini etkilemesin)."""
+    """
+    Her testten önce ve sonra favoriler/geri bildirim dosyalarını temizler
+    (testler birbirini etkilemesin). Uygulama artık oturum bazlı dosyalar
+    kullandığı için (data/favorites_<sid>.json, data/feedback_<sid>.json),
+    hem eski (paylaşılan) dosya adlarını hem de data/ klasörünü temizliyoruz.
+    """
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    fav_path = os.path.join(base_dir, "user_favorites.json")
-    feedback_path = os.path.join(base_dir, "user_feedback.json")
-    for p in (fav_path, feedback_path):
-        if os.path.exists(p):
-            os.remove(p)
+    legacy_paths = [
+        os.path.join(base_dir, "user_favorites.json"),
+        os.path.join(base_dir, "user_feedback.json"),
+    ]
+    data_dir = os.path.join(base_dir, "data")
+
+    def _temizle():
+        for p in legacy_paths:
+            if os.path.exists(p):
+                os.remove(p)
+        if os.path.isdir(data_dir):
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    _temizle()
     yield
-    for p in (fav_path, feedback_path):
-        if os.path.exists(p):
-            os.remove(p)
+    _temizle()
 
 
 @pytest.fixture(autouse=True)
@@ -366,7 +379,8 @@ def test_daha_fazla_goster_sayisi_artiriyor():
         for i in range(start, start + 20):
             r.append({"id": i, "title": f"Film {i}", "vote_average": 7.0, "overview": "x",
                        "poster_url": None, "release_date": "2020-01-01",
-                       "content_type": "movie", "popularity": 100 - i})
+                       "content_type": "movie", "popularity": 100 - i,
+                       "genre_ids": [35]})  # Komedi birincil tur olarak
         r.total_results = 500
         return r
 
@@ -807,6 +821,103 @@ def test_metin_paylasim_secenekleri_kaldirildi():
         assert share_text_widget is None, "'Paylaşım metni' kutusu hâlâ görünüyor, kaldırılmalıydı"
     finally:
         _stop_patches(patches)
+
+
+# =============================================================================
+# 14) ÇOK KULLANICILI OTURUM İZOLASYONU TESTLERİ
+# =============================================================================
+
+def test_farkli_oturumlarin_favorileri_karismiyor():
+    """
+    KRİTİK: İki farklı oturum (kullanıcı) kimliğiyle oluşturulan
+    FavoritesManager'lar birbirinin verisini görmemeli/üzerine yazmamalı.
+    Bu, uygulamanın gerçekten birden fazla kullanıcıyla güvenle
+    kullanılabilmesi için şart.
+    """
+    import streamlit as st
+    from utils.favorites_manager import FavoritesManager
+
+    # Bare modda (AppTest dışında) st.session_state süreç genelinde
+    # paylaşıldığı için, önceki testlerden kalıntı olmasın diye başta
+    # da temizliyoruz.
+    st.session_state["favorites"] = []
+
+    fm_a = FavoritesManager(session_id="kullanici_a")
+    fm_a.add({"id": 1, "title": "Kullanici A'nin Filmi", "content_type": "movie"})
+
+    # session_state paylasimli oldugu icin (tek process), ikinci yoneticiyi
+    # olusturmadan once session_state'i sifirlayalim - gercek hayatta bu
+    # farkli tarayicilar/sekmeler oldugu icin dogal olarak ayri olur.
+    st.session_state["favorites"] = []
+
+    fm_b = FavoritesManager(session_id="kullanici_b")
+
+    assert fm_b.get_count() == 0, "Kullanıcı B, kullanıcı A'nın favorisini görmemeli"
+    assert fm_a.FAVORITES_FILE != fm_b.FAVORITES_FILE, "İki oturum aynı dosyayı kullanıyor olamaz"
+
+    fm_b.add({"id": 2, "title": "Kullanici B'nin Filmi", "content_type": "movie"})
+
+    # Dosyalarin gercekten birbirinden bagimsiz oldugunu dogrudan kontrol et
+    import json
+    with open(fm_a.FAVORITES_FILE) as f:
+        data_a = json.load(f)
+    with open(fm_b.FAVORITES_FILE) as f:
+        data_b = json.load(f)
+
+    assert len(data_a) == 1 and data_a[0]["title"] == "Kullanici A'nin Filmi"
+    assert len(data_b) == 1 and data_b[0]["title"] == "Kullanici B'nin Filmi"
+
+
+def test_oturum_kimligi_url_query_paramina_yaziliyor():
+    """
+    Oturum kimliği hem session_state'te hem URL'nin query param'ında
+    tutulmalı — böylece sayfa yenilense (F5) bile aynı veriye dönülebilir.
+    """
+    at, patches = _mocked_app()
+    try:
+        assert len(at.exception) == 0
+        assert "sid" in at.query_params, "Oturum kimliği URL'ye yazılmamış"
+        assert len(at.query_params["sid"]) > 0
+    finally:
+        _stop_patches(patches)
+
+
+# =============================================================================
+# 15) KATI (BİRİNCİL) TÜR FİLTRESİ TESTLERİ
+# =============================================================================
+
+def test_ikincil_tur_olarak_eslesen_icerikler_eleniyor():
+    """
+    'Parazit'/'Moana' senaryosu: bir içeriğin türlerinden biri seçilen türle
+    eşleşse bile, o tür İÇERİĞİN BİRİNCİL (ilk) türü değilse elenmeli.
+    """
+    from unittest.mock import patch as mock_patch
+    from utils.tmdb_client import ResultList
+
+    def fake_discover(**kwargs):
+        r = ResultList()
+        # Komedi (35) ikincil tur olarak geciyor - elenmeli
+        r.append({"id": 1, "title": "Parazit Benzeri", "genre_ids": [18, 53, 35],
+                   "release_date": "2019-01-01", "vote_average": 8.5})
+        r.append({"id": 2, "title": "Moana Benzeri", "genre_ids": [16, 12, 10751, 35],
+                   "release_date": "2016-01-01", "vote_average": 7.6})
+        # Komedi (35) birincil tur - kalmali
+        r.append({"id": 3, "title": "Gercek Komedi", "genre_ids": [35, 10749],
+                   "release_date": "2020-01-01", "vote_average": 6.8})
+        r.total_results = 3
+        return r
+
+    with mock_patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
+         mock_patch.dict(os.environ, {"TMDB_API_KEY": "dummy"}):
+        from utils.tmdb_client import TMDBClient
+        tmdb = TMDBClient()
+        tmdb.discover_movies = lambda **kw: fake_discover(**kw)
+
+        from app import _discover
+        result = _discover(tmdb, [35], [], (0.0, 10.0), (1950, 2026), None, "popularity.desc", "movie", 1)
+
+        assert len(result) == 1
+        assert result[0]["id"] == 3, "Sadece Komedi'nin birincil tür olduğu içerik kalmalıydı"
 
 
 if __name__ == "__main__":

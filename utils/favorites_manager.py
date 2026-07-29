@@ -2,6 +2,11 @@
 Favori Yönetimi
 ---------------
 Kullanıcı favorilerini session state ve JSON ile yönetir.
+
+ÖNEMLİ: Uygulama artık birden fazla gerçek kullanıcı tarafından aynı anda
+kullanılabildiği için, favoriler TEK bir ortak dosyada değil, her tarayıcı
+oturumuna özel AYRI bir dosyada tutulur (bkz. `session_id`). Aksi halde
+farklı kullanıcıların favorileri birbirinin üzerine yazılır.
 """
 
 import json
@@ -10,15 +15,31 @@ from datetime import datetime
 from typing import Optional
 import streamlit as st
 
+_DATA_DIR = "data"
+
 
 class FavoritesManager:
-    """Kullanıcı favorilerini yöneten sınıf."""
-    
-    FAVORITES_FILE = "user_favorites.json"
+    """Kullanıcı favorilerini yöneten sınıf (oturuma özel dosya ile)."""
+
     SESSION_KEY = "favorites"
-    
-    def __init__(self):
-        """Favorileri başlat."""
+
+    def __init__(self, session_id: Optional[str] = None):
+        """
+        Favorileri başlat.
+
+        Args:
+            session_id: Bu tarayıcı oturumuna özel benzersiz kimlik. Verilirse
+                favoriler `data/favorites_<session_id>.json` dosyasında
+                tutulur (kullanıcılar arası karışma olmaz). Verilmezse (ör.
+                testlerde) eski paylaşılan dosya adına düşer.
+        """
+        self._session_id = session_id
+        if session_id:
+            os.makedirs(_DATA_DIR, exist_ok=True)
+            self.FAVORITES_FILE = os.path.join(_DATA_DIR, f"favorites_{session_id}.json")
+        else:
+            self.FAVORITES_FILE = "user_favorites.json"
+
         self._init_session_state()
         self._load_from_file()
     
