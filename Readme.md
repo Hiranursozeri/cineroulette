@@ -2,44 +2,85 @@
 
 **Ne izleyeceğine karar veremedin mi? Çarkı çevir, ya da bir kart çek.**
 
-CineRoulette, TMDB (The Movie Database) verisiyle çalışan, ruh haline göre film/dizi öneren, eğlenceli bir "seçim ritüeli" (dönen çark veya kart destesi) sunan bir web uygulamasıdır. Streamlit ile geliştirilmiş, [Streamlit Community Cloud](https://streamlit.io/cloud) üzerinde canlı olarak yayında.
+CineRoulette, [TMDB (The Movie Database)](https://www.themoviedb.org/) verisiyle çalışan, ruh haline göre film/dizi öneren, eğlenceli bir "seçim ritüeli" (dönen çark veya kart destesi) sunan bir web uygulamasıdır. Streamlit ile geliştirilmiş, [Streamlit Community Cloud](https://streamlit.io/cloud) üzerinde canlı olarak yayında ve birden fazla kullanıcıyı aynı anda, birbirinin verisine karışmadan destekler.
 
 🔗 **Canlı demo:** [cineroulette-ceqqhowxiaquscdmighkvz.streamlit.app](https://cineroulette-ceqqhowxiaquscdmighkvz.streamlit.app)
+
+---
+
+## 📖 İçindekiler
+
+- [Özellikler](#-özellikler)
+- [Nasıl Çalışır](#️-nasıl-çalışır)
+- [Teknoloji Yığını](#️-teknoloji-yığını)
+- [Proje Yapısı](#-proje-yapısı)
+- [Kurulum](#-kurulum-yerel-geliştirme)
+- [Canlıya Alma](#️-canlıya-alma-streamlit-community-cloud)
+- [Test](#-test)
+- [Bilinen Kısıtlamalar](#️-bilinen-kısıtlamalar)
+- [Lisans](#-lisans)
 
 ---
 
 ## ✨ Özellikler
 
 ### 🎯 Akıllı Filtreleme
-- **Ruh Haline Göre** — Ağlamalık, Heyecan Lazım, Korku Gecesi, Düşündürücü gibi ruh hallerine göre öneri. Tek bir ruh hali seçildiğinde, TMDB anahtar kelimeleriyle (tearjerker, supernatural, psychological thriller vb.) gerçek bir "tema" eşlemesi yapılır — sadece tür eşleşmesi değil.
-- **Türe Göre** — Klasik tür bazlı filtreleme. **Katı birincil-tür kontrolü** ile çalışır: bir film "Komedi" olarak seçildiğinde, Komedi'nin o filmin TMDB'de listelenen **birincil (dominant) türü** olması şart koşulur — "Parazit" ya da "Moana" gibi Komedi'yi sadece ikincil/yan tür olarak taşıyan filmler artık çıkmaz.
-- **Favorilerimden** — Kendi favori listenden rastgele seçim
-- **Rastgele** — Kaliteli, geniş bir içerik havuzundan rastgele seçim
 
-Ruh hali ve tür filtreleri birbirini dışlar (aynı anda ikisi de seçilemez). Ek filtreler: puan aralığı, yapım yılı aralığı, süre (film için), içerik türü (film/dizi). Havuz, çeşitliliği artırmak için her zaman ~60 sonuca kadar genişletilir — aynı birkaç filmin sürekli tekrarlanmasını önler.
+Sidebar'da dört filtreleme modu var, **birbirini dışlarlar** (aynı anda ikisi birden aktif olamaz — böylece "Ağlamalık + Komedi" gibi anlamsız kombinasyonlar oluşmaz):
+
+| Mod | Ne yapar |
+|---|---|
+| 🎭 **Ruh Haline Göre** | Ağlamalık, Heyecan Lazım, Korku Gecesi, Düşündürücü. Tek bir ruh hali seçildiğinde, TMDB anahtar kelimeleriyle (ör. "tearjerker", "supernatural", "psychological thriller") gerçek bir *tema* eşlemesi yapılır — yalnızca tür eşleşmesi değil. |
+| 🎬 **Türe Göre** | Klasik tür bazlı filtreleme. **Katı birincil-tür kontrolü** ile çalışır: bir film "Komedi" olarak seçildiğinde, Komedi'nin o filmin TMDB'de listelenen **birincil (dominant) türü** olması şart koşulur. "Parazit" ya da "Moana" gibi Komedi'yi sadece ikincil/yan tür olarak taşıyan filmler artık listede çıkmaz. |
+| ❤️ **Favorilerimden** | Çark/kart, tamamen kendi favori listenden besleniyor. |
+| 🎲 **Rastgele** | Ruh hali/tür filtrelerini yok sayıp, kaliteli ve geniş bir havuzdan tamamen rastgele seçim yapar. |
+
+Ek olarak: **puan aralığı**, **yapım yılı aralığı**, **süre** (sadece filmlerde — TMDB dizilerde süre filtresini desteklemiyor) ve **içerik türü** (film/dizi) filtreleri her modda kullanılabilir.
+
+Havuz, çeşitliliği artırmak için TMDB'den her zaman ~60 sonuca kadar (3 sayfa) genişletilir — aynı birkaç "en popüler" filmin sürekli tekrarlanmasını önler. "Tüm sonuçları listele" bölümünde ayrıca "Daha fazla göster" ile havuzu daha da büyütebilirsin.
 
 ### 🎡 İki Farklı Seçim Ritüeli
-- **Çark** — Klasik dönen çark animasyonu, sonucu merkezi bir pop-up'ta gösterir
-- **🃏 Kart Destesi** — Yelpaze şeklinde açılmış, yüzü kapalı kartlardan birini seç, anında açılsın
+
+- **🎰 Çark** — Klasik dönen çark animasyonu (HTML/CSS/JS ile elden yazılmış, dış kütüphane kullanmadan), sonucu ekranın tam ortasında bir pop-up'ta (`st.dialog`) gösterir.
+- **🃏 Kart Destesi** — Havuzdan seçilen 8 kart, gerçek bir iskambil destesi gibi hafifçe döndürülmüş ve üst üste binmiş şekilde ("yelpaze") gösterilir. Bir karta tıklayınca anında açılır — çarkın aksine bekleme animasyonu yoktur.
+
+Her iki mod da aynı sonuç pop-up'ını, aynı favorileme/geri bildirim akışını paylaşır.
 
 ### 🤖 AI Destekli Öneriler
-Favorilerine göre TF-IDF tabanlı bir öneri motoru, zevkine en yakın içerikleri buluyor. Her aday, favorilerinin **her biriyle ayrı ayrı** karşılaştırılıp en iyi eşleşme skoru alınıyor (çeşitli zevklerin birbirini "sulandırması" engellenir).
+
+Favorilerine göre TF-IDF (metin benzerliği) tabanlı bir öneri motoru çalışır. Her aday içerik, favorilerinin **her biriyle ayrı ayrı** karşılaştırılıp en iyi eşleşme skoru alınır — bu sayede çeşitli zevklerin (ör. hem korku hem romantik komedi sevmek) birbirini "sulandırıp" tüm skorları düşürmesi engellenir. Tür eşleşmesine metin benzerliğinden çok daha yüksek ağırlık verilir. Hesaplama, sayfa her etkileşimde otomatik tetiklenmez — sadece "Önerileri Hesapla" butonuna basınca çalışır (gereksiz TMDB isteklerini önlemek için).
 
 ### ❤️ Favoriler ve Geri Bildirim
-- Doğrudan film/dizi arayıp favorilere ekleme (filtrelerden geçmeye gerek yok)
-- **✅ Beğendim / 🚫 Beğenmedim** — beğenmediklerin bir daha çarkta/listede çıkmaz; beğendiklerin gizlenmez, sadece kaydedilir (pozitif bir işaret)
-- Ayrı bir "Geri Bildirimlerim" sayfasından işaretlerini istediğin zaman geri alabilirsin
+
+- **Film/Dizi Ara** — Favoriler sayfasında doğrudan isimle arama yapıp ekleyebilirsin, filtrelerden geçmen gerekmez.
+- **✅ Beğendim / 🚫 Beğenmedim** — Her içerik kartında ve sonuç pop-up'ında bulunur.
+  - *Beğenmedim* dediğin içerik bir daha çarkta/kart destesinde/listede/AI önerilerinde **çıkmaz**, ve favorideyse otomatik olarak favorilerden de kaldırılır.
+  - *Beğendim* tamamen olumlu bir işarettir — o içeriği gizlemez, sadece kaydeder (favorilemekten farklı, daha "hafif" bir onay).
+- **"👍👎 Geri Bildirimlerim"** sayfasında Beğendiklerim / Beğenmediklerim listelerini görüp, "↩️ Geri Al" ile fikrini değiştirebilirsin.
 
 ### 🎬 Zengin İçerik Bilgisi
-- **Nerede izlenir** — Türkiye'deki yayın platformu bilgisi (Netflix, Prime Video vb.)
-- **Fragman gömme** — YouTube fragmanı doğrudan uygulama içinde oynatılır
-- **Paylaşılabilir sonuç kartı** — Poster + başlık + puan içeren özel tasarım bir görsel otomatik oluşturulur; indirilebilir veya (mobil tarayıcılarda) doğrudan WhatsApp/Instagram gibi uygulamalara "gerçek görsel" olarak paylaşılabilir
+
+- **📺 Nerede izlenir** — TMDB'nin `watch/providers` verisiyle, Türkiye'deki yayın platformu bilgisi (Netflix, Prime Video, kiralama/satın alma seçenekleri).
+- **🎬 Fragman gömme** — TMDB'nin video verisinden YouTube fragmanı bulunup uygulama içinde doğrudan oynatılır (Trailer > Teaser > herhangi bir video önceliğiyle). Gömülü oynatıcı bazı kurumsal/okul Google hesaplarında kısıtlanabildiği için, her zaman "YouTube'da aç" yedek linki de gösterilir.
+- **📤 Paylaşılabilir sonuç kartı** — Poster + film başlığı + puan + "CineRoulette" markası içeren özel bir görsel, Pillow ile anlık olarak oluşturulur. İndirilebilir, ya da (mobil tarayıcılarda, Web Share API destekleniyorsa) doğrudan WhatsApp/Instagram gibi uygulamalara gerçek bir görsel dosyası olarak paylaşılabilir.
 
 ### 👥 Çoklu Kullanıcı Desteği
-Her ziyaretçiye benzersiz bir oturum kimliği atanır (URL'de görünmez bir `?sid=...` parametresi olarak taşınır). Favoriler ve geri bildirimler **her kullanıcıya özel ayrı dosyalarda** tutulur — farklı ziyaretçilerin verileri asla birbirine karışmaz veya üzerine yazılmaz. Kimlik URL'de tutulduğu için, sayfa yenilense (F5) bile aynı veriye geri dönülebilir.
+
+Her ziyaretçiye ilk girişinde benzersiz bir oturum kimliği atanır ve bu kimlik URL'de görünmez bir `?sid=...` parametresi olarak taşınır. Favoriler ve geri bildirimler bu kimliğe özel, **birbirinden tamamen ayrı dosyalarda** (`data/favorites_<kimlik>.json`, `data/feedback_<kimlik>.json`) tutulur — farklı ziyaretçilerin verileri asla karışmaz veya birbirinin üzerine yazılmaz. Kimlik URL'de tutulduğu için, sayfa yenilense (F5) bile kullanıcı kendi verisine geri döner; sadece tarayıcı adres çubuğundaki `?sid=` kısmı silinir/paylaşılırsa yeni bir oturum başlar.
 
 ### 🎨 Tasarım
-Koyu (Netflix esintili) tema, mobil uyumlu responsive tasarım (çark ve kart destesi dar ekranlarda otomatik küçülür).
+
+Koyu (Netflix esintili) tema — `.streamlit/config.toml` ile resmi Streamlit tema sistemi kullanılarak uygulanır (yerleşik bileşenlerin — dropdown, slider, metin kutusu vb. — hepsi tutarlı görünür). Çark ve kart destesi, dar (mobil) ekranlarda otomatik küçülüp taşmayı önler. Temel SEO meta etiketleri (açıklama, Open Graph, Twitter Card) sayfaya JS ile enjekte edilir.
+
+---
+
+## ⚙️ Nasıl Çalışır
+
+1. Sidebar'dan bir filtreleme modu ve (varsa) alt seçimler yapılır.
+2. Seçimlere göre TMDB'nin `discover` uç noktasından bir içerik havuzu çekilir (3 dakika önbelleğe alınır, gereksiz tekrar isteklerini önler).
+3. Havuzdan rastgele 20 içerik, çark ya da kart destesi için örneklenir.
+4. Kullanıcı çarkı çevirir ya da bir kart seçer; kazanan, merkezi bir pop-up'ta (poster, puan, nerede izlenir, fragman, paylaşım seçenekleriyle) gösterilir.
+5. Kullanıcı isterse favorilere ekler, beğendim/beğenmedim işaretler, ya da sonucu paylaşır.
 
 ---
 
@@ -69,8 +110,8 @@ film_carki/
 │   └── config.toml                  # Koyu tema ayarları
 ├── data/                             # Kullanıcı bazlı favori/geri bildirim dosyaları (git'e gitmez)
 ├── utils/
-│   ├── tmdb_client.py                # TMDB API istemcisi
-│   ├── movie_filters.py              # Ruh hali / tür tanımları
+│   ├── tmdb_client.py                # TMDB API istemcisi (discover, arama, video, watch providers)
+│   ├── movie_filters.py              # Ruh hali / tür tanımları, anahtar kelime eşlemeleri
 │   ├── favorites_manager.py          # Favori yönetimi (oturum bazlı, JSON kalıcı)
 │   ├── feedback_manager.py           # Beğendim/Beğenmedim yönetimi (oturum bazlı)
 │   └── share_card.py                 # Paylaşılabilir görsel oluşturma
@@ -132,25 +173,23 @@ Kod, hem yerel `.env` dosyasını hem canlı ortamda Streamlit'in **Secrets** si
 
 ## 🧪 Test
 
-Gerçek bir API anahtarına veya internete ihtiyaç duymayan (tüm TMDB çağrıları sahte verilerle değiştirilmiş) kapsamlı bir otomatik test paketi:
+Gerçek bir API anahtarına veya internete ihtiyaç duymayan (tüm TMDB çağrıları sahte verilerle değiştirilmiş) kapsamlı bir otomatik test paketi mevcut:
 
 ```powershell
 pip install pytest
 pytest test_app.py -v
 ```
 
-Test paketi şunları kapsar: filtre modu geçişleri, katı tür eşleşmesi, çark/kart destesi akışı, favoriler, AI önerileri, beğendim/beğenmedim geri bildirimi, fragman gömme, paylaşılabilir görsel oluşturma, **ve çoklu kullanıcı oturum izolasyonu**.
+Test paketi şunları kapsar: filtre modu geçişleri, katı tür eşleşmesi, çark/kart destesi akışı, favoriler, AI önerileri, beğendim/beğenmedim geri bildirimi, fragman gömme, paylaşılabilir görsel oluşturma ve çoklu kullanıcı oturum izolasyonu.
 
 ---
 
-## 🗺️ Geliştirme Yol Haritası
+## ⚠️ Bilinen Kısıtlamalar
 
-- [x] **Faz 1** — Gelişmiş filtreleme (ruh hali, tür, puan, yıl, süre, anahtar kelime eşleme, katı birincil tür kontrolü)
-- [x] **Faz 2** — Favorilerden çark/kart çevirme
-- [x] **Faz 3** — Özgünleştirme (kart destesi, beğendim/beğenmedim, film arama, fragman, paylaşılabilir kart)
-- [x] **Faz 4** — Canlıya alma (Streamlit Community Cloud, Secrets desteği, çoklu kullanıcı oturum izolasyonu, temel SEO)
-  - [ ] Gerçek kullanıcılarla çoklu kişi testi (devam ediyor)
-  - [ ] Özel alan adı (opsiyonel)
+- **Kalıcılık:** Favoriler/geri bildirimler sunucudaki JSON dosyalarında tutulur; Streamlit Community Cloud uygulaması yeniden başlatılırsa (ör. uzun süre trafik almadıktan sonra) bu veriler kaybolabilir. Gerçek bir üretim ortamı için bir veritabanı (PostgreSQL, Firebase vb.) kullanılması önerilir.
+- **"Görseli Doğrudan Paylaş" özelliği** (Web Share API), masaüstü tarayıcılarda genellikle desteklenmez; en iyi deneyim mobil Chrome/Safari'de yaşanır.
+- **Fragman gömme**, bazı kurumsal/okul Google hesaplarının politikaları nedeniyle bazı kullanıcılarda kısıtlanabilir (bu durumda "YouTube'da aç" linki devreye girer).
+- Bu proje kişisel/eğitim amaçlıdır; ölçekli, çok sayıda eşzamanlı kullanıcıya hizmet vermek için tasarlanmamıştır.
 
 ---
 
