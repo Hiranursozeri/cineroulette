@@ -7,6 +7,7 @@ Geliştirilmiş hata yönetimi ve detaylı film bilgisi desteği.
 import os
 import random
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 from typing import Optional
 
@@ -34,16 +35,31 @@ class TMDBClient:
     PLACEHOLDER_POSTER = "https://via.placeholder.com/342x513/1a1a2e/fff"
     def __init__(self):
         """API anahtarını yükle ve doğrula."""
-        self.api_key = os.getenv("TMDB_API_KEY")
+        self.api_key = self._get_api_key()
         
         if not self.api_key:
             raise ValueError(
                 "TMDB_API_KEY bulunamadı! "
-                "Lütfen .env dosyasına API anahtarınızı ekleyin."
+                "Yerelde .env dosyasına, canlıda Streamlit Secrets'a ekleyin."
             )
         
         # API bağlantısını test et
         self._validate_api_key()
+
+    @staticmethod
+    def _get_api_key() -> Optional[str]:
+        """
+        API anahtarını önce Streamlit Secrets'tan (canlı/deploy ortamında)
+        okumaya çalışır, orada yoksa ortam değişkenine/.env dosyasına
+        (yerel geliştirmede) düşer. Bu sayede aynı kod hem yerelde hem
+        Streamlit Community Cloud'da değişiklik yapmadan çalışır.
+        """
+        try:
+            if "TMDB_API_KEY" in st.secrets:
+                return st.secrets["TMDB_API_KEY"]
+        except Exception:
+            pass  # secrets.toml yoksa (yerel geliştirmede normaldir) sessizce geç
+        return os.getenv("TMDB_API_KEY")
     
     def _validate_api_key(self) -> None:
         """API anahtarının geçerli olduğunu doğrula."""
