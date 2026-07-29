@@ -25,10 +25,50 @@ from ml.recommendation_engine import RecommendationEngine
 # =============================================================================
 
 st.set_page_config(
-    page_title="CineRoulette 🎬",
+    page_title="CineRoulette 🎬 - Ne İzleyeceğine Karar Ver",
     page_icon="🎰",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# Streamlit'in `set_page_config`'i meta açıklama / sosyal medya önizleme
+# etiketlerini (Open Graph, Twitter Card) desteklemiyor — bunları JS ile
+# sayfanın gerçek <head> kısmına ekliyoruz. Bu hem Google'ın arama
+# sonuçlarında gösterdiği açıklamayı hem de WhatsApp/Twitter gibi
+# uygulamalarda linki paylaşınca çıkan önizleme kartını iyileştirir.
+st.iframe(
+    """
+    <script>
+    (function() {
+        try {
+            const head = window.parent.document.head;
+            const metaTags = [
+                {name: "description", content: "CineRoulette — Ne izleyeceğine karar veremedin mi? Ruh haline göre film/dizi öner, çarkı çevir ya da bir kart çek. Ücretsiz, hesap gerektirmez."},
+                {property: "og:title", content: "CineRoulette 🎬 - Ne İzleyeceğine Karar Ver"},
+                {property: "og:description", content: "Ruh haline göre film/dizi öner, çarkı çevir ya da bir kart çek."},
+                {property: "og:type", content: "website"},
+                {name: "twitter:card", content: "summary"},
+                {name: "twitter:title", content: "CineRoulette 🎬"},
+                {name: "twitter:description", content: "Ne izleyeceğine karar veremedin mi? Çarkı çevir ya da bir kart çek."},
+            ];
+            metaTags.forEach(function(tagInfo) {
+                const key = tagInfo.name ? "name" : "property";
+                const value = tagInfo.name || tagInfo.property;
+                let el = head.querySelector('meta[' + key + '="' + value + '"]');
+                if (!el) {
+                    el = window.parent.document.createElement("meta");
+                    el.setAttribute(key, value);
+                    head.appendChild(el);
+                }
+                el.setAttribute("content", tagInfo.content);
+            });
+        } catch (e) {
+            // Sandbox kısıtlaması olursa sessizce geç, sayfanın geri kalanını bozmasın.
+        }
+    })();
+    </script>
+    """,
+    height=1,
 )
 
 # Koyu (Netflix tarzı) tema
