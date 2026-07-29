@@ -1,11 +1,15 @@
 import random
 import time
 import datetime
+import base64
+import json
 import streamlit as st
 from typing import Optional
 
 from utils.tmdb_client import TMDBClient, ResultList
 from utils.favorites_manager import FavoritesManager
+from utils.feedback_manager import FeedbackManager
+from utils.share_card import generate_share_card
 from utils.movie_filters import (
     MOOD_FILTERS, GENRE_FILTERS, RANDOM_FILTER,
     AI_RECOMMENDATION_FILTER, FilterConfig,
@@ -99,6 +103,7 @@ st.markdown("""
         border: 1px solid #3a3a3a;
         background: #262626;
         color: #f5f5f5;
+        min-height: 2.6rem;
     }
     .stButton > button:hover {
         border-color: #e50914;
@@ -145,6 +150,11 @@ def init_ml_engine() -> RecommendationEngine:
 def init_favorites_manager() -> FavoritesManager:
     """Favori yöneticisini başlat (her oturumda yeni)."""
     return FavoritesManager()
+
+
+def init_feedback_manager() -> FeedbackManager:
+    """İzledim/beğenmedim geri bildirim yöneticisini başlat."""
+    return FeedbackManager()
 
 
 # =============================================================================
@@ -333,9 +343,13 @@ def fetch_filtered_pool(
 
         results, total_results = _fetch(page=1)
 
-        # Havuz çark için yetersizse (ve daha fazla sonuç varsa) ek sayfalar çek.
+        # Çeşitliliği artırmak için her zaman daha büyük bir aday havuzu
+        # hedefliyoruz (sadece sonuç azken değil) — yoksa havuz hep aynı
+        # ~20 "en popüler" sonuçla sınırlı kalıyor ve çark/kart tekrar tekrar
+        # aynı birkaç filmi gösteriyordu.
+        target_pool_size = 60
         page = 2
-        while len(results) < 8 and page <= 3 and total_results > len(results):
+        while len(results) < target_pool_size and page <= 3 and total_results > len(results):
             more, _ = _fetch(page=page)
             existing_ids = {item.get("id") for item in results}
             results.extend(item for item in more if item.get("id") not in existing_ids)
@@ -417,6 +431,7 @@ def fetch_ai_recommendations(
 def _render_content_card_body(
     content: dict,
     fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
     show_similarity: bool,
     idx: int = 0,
     key_prefix: str = "grid",
@@ -456,10 +471,31 @@ def _render_content_card_body(
         st.toast(f"{'❤️' if is_now_fav else '💔'} {message}: {title}")
         st.rerun()
 
+    if feedback_manager.is_watched(content_id):
+        st.success("Beğendin", icon="✅")
+    elif feedback_manager.is_disliked(content_id):
+        st.error("Beğenmedin", icon="🚫")
+    else:
+        fb_col1, fb_col2 = st.columns(2)
+        with fb_col1:
+            if st.button("✅ Beğendim", key=f"watched_{key_prefix}_{idx}_{content_id}", width="stretch"):
+                feedback_manager.mark_watched(content)
+                st.toast(f"✅ '{title}' beğendiğin olarak kaydedildi.")
+                st.rerun()
+        with fb_col2:
+            if st.button("🚫 Beğenmedim", key=f"disliked_{key_prefix}_{idx}_{content_id}", width="stretch"):
+                feedback_manager.mark_disliked(content)
+                if is_fav:
+                    fav_manager.remove(content_id)
+                st.toast(f"🚫 '{title}' bir daha önerilmeyecek.")
+                st.rerun()
+
+
 
 def display_content_card(
     content: dict,
     fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
     show_similarity: bool = False,
     col=None,
     idx: int = 0,
@@ -479,14 +515,15 @@ def display_content_card(
     """
     if col is not None:
         with col:
-            _render_content_card_body(content, fav_manager, show_similarity, idx=idx, key_prefix=key_prefix)
+            _render_content_card_body(content, fav_manager, feedback_manager, show_similarity, idx=idx, key_prefix=key_prefix)
     else:
-        _render_content_card_body(content, fav_manager, show_similarity, idx=idx, key_prefix=key_prefix)
+        _render_content_card_body(content, fav_manager, feedback_manager, show_similarity, idx=idx, key_prefix=key_prefix)
 
 
 def display_content_grid(
     items: list[dict],
     fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
     show_similarity: bool = False,
     key_prefix: str = "grid",
 ) -> None:
@@ -495,25 +532,67 @@ def display_content_grid(
         st.warning("🔍 Bu kriterlere uygun içerik bulunamadı.")
         return
 
+    st.caption("🌟 = 8+ puan · ⭐ = 7-7.9 puan · ✨ = 7'nin altı")
+
     cols = st.columns(3)
 
     for idx, item in enumerate(items):
         with cols[idx % 3]:
-            _render_content_card_body(item, fav_manager, show_similarity, idx=idx, key_prefix=key_prefix)
+            _render_content_card_body(item, fav_manager, feedback_manager, show_similarity, idx=idx, key_prefix=key_prefix)
             st.divider()
 
 
-def display_favorites_page(fav_manager: FavoritesManager) -> None:
+def display_favorites_page(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_manager: FeedbackManager) -> None:
     """Favoriler sayfasını göster."""
     st.header("❤️ Favorilerim")
+
+    # ---- ARAMA: favorileri sıfırdan oluşturabilmek için ----
+    st.markdown('<div class="section-title">🔍 Film / Dizi Ara</div>', unsafe_allow_html=True)
+    st.caption("Aklındaki filmi doğrudan ara, favorilere ekle — filtrelerden geçmene gerek yok.")
+
+    s_col1, s_col2, s_col3 = st.columns([3, 1.2, 1])
+    with s_col1:
+        search_query = st.text_input(
+            "Ara", key="fav_search_query", label_visibility="collapsed",
+            placeholder="Film veya dizi adı yaz...",
+        )
+    with s_col2:
+        search_type = st.selectbox(
+            "Tür", options=["movie", "tv"], key="fav_search_type", label_visibility="collapsed",
+            format_func=lambda x: "🎥 Film" if x == "movie" else "📺 Dizi",
+        )
+    with s_col3:
+        search_clicked = st.button("🔍 Ara", key="fav_search_btn", width="stretch", type="primary")
+
+    st.session_state.setdefault("fav_search_results", None)
+    st.session_state.setdefault("fav_search_query_done", "")
+
+    if search_clicked and search_query.strip():
+        with st.spinner("Aranıyor..."):
+            if search_type == "movie":
+                results = tmdb.search_movies(search_query.strip())
+            else:
+                results = tmdb.search_tv_shows(search_query.strip())
+        st.session_state["fav_search_results"] = results
+        st.session_state["fav_search_query_done"] = search_query.strip()
+
+    if st.session_state["fav_search_results"] is not None:
+        results = st.session_state["fav_search_results"]
+        if results:
+            st.caption(f"'{st.session_state['fav_search_query_done']}' için {len(results)} sonuç bulundu.")
+            display_content_grid(results[:12], fav_manager, feedback_manager, show_similarity=False, key_prefix="favsearch")
+        else:
+            st.warning(f"'{st.session_state['fav_search_query_done']}' için sonuç bulunamadı.")
+
+    st.divider()
 
     favorites = fav_manager.get_all()
 
     if not favorites:
         st.info(
             "📭 Henüz favori eklememişsin.\n\n"
-            "Film veya dizileri keşfederken **'Favorilere Ekle'** butonuna tıklayarak "
-            "listeni oluşturabilirsin!"
+            "Yukarıdan arama yaparak ya da film/dizileri keşfederken **'Favorilere Ekle'** "
+            "butonuna tıklayarak listeni oluşturabilirsin!"
         )
         return
 
@@ -527,7 +606,7 @@ def display_favorites_page(fav_manager: FavoritesManager) -> None:
         shows = [f for f in favorites if f.get("content_type") == "tv"]
         st.metric("Dizi", len(shows))
 
-    st.caption("💡 İpucu: Anasayfa'daki filtre panelinden **'❤️ Favorilerimden'** modunu seçerek çarkı doğrudan bu listeden çevirebilirsin.")
+    st.caption("💡 İpucu: Anasayfa'daki filtre panelinden **'❤️ Favorilerimden'** modunu seçerek çarkı veya kart destesini doğrudan bu listeden çalıştırabilirsin.")
 
     st.divider()
 
@@ -562,12 +641,65 @@ def display_favorites_page(fav_manager: FavoritesManager) -> None:
             st.divider()
 
 
+def display_feedback_page(fav_manager: FavoritesManager, feedback_manager: FeedbackManager) -> None:
+    """Beğendiğim / Beğenmediğim listelerini gösterir, geri alma imkanı sunar."""
+    st.header("👍👎 Beğendiklerim / Beğenmediklerim")
+    st.caption(
+        "Beğendiğin içerikler çarkta/listede görünmeye devam eder — sadece "
+        "beğenmediklerin gizlenir. Fikrini değiştirirsen buradan geri alabilirsin."
+    )
+
+    liked_tab, disliked_tab = st.tabs(["✅ Beğendiklerim", "🚫 Beğenmediklerim"])
+
+    with liked_tab:
+        liked_items = feedback_manager.get_watched_list()
+        if not liked_items:
+            st.info("📭 Henüz hiçbir şeyi 'Beğendim' olarak işaretlemedin.")
+        else:
+            st.caption(f"{len(liked_items)} içerik")
+            cols = st.columns(3)
+            for idx, item in enumerate(liked_items):
+                with cols[idx % 3]:
+                    st.markdown(f"**{item.get('title', 'Bilinmiyor')}**")
+                    content_label = "🎬 Film" if item.get("content_type") == "movie" else "📺 Dizi"
+                    st.caption(content_label)
+                    if st.button("↩️ Geri Al", key=f"undo_watched_{idx}_{item.get('id')}", width="stretch"):
+                        feedback_manager.unmark(item.get("id"))
+                        st.toast(f"↩️ '{item.get('title')}' için işaret geri alındı.")
+                        st.rerun()
+                    st.divider()
+
+    with disliked_tab:
+        disliked_items = feedback_manager.get_disliked_list()
+        if not disliked_items:
+            st.info("📭 Henüz hiçbir şeyi 'Beğenmedim' olarak işaretlemedin.")
+        else:
+            st.caption(f"{len(disliked_items)} içerik — bunlar çarkta/listede/AI önerilerinde gizleniyor.")
+            cols = st.columns(3)
+            for idx, item in enumerate(disliked_items):
+                with cols[idx % 3]:
+                    st.markdown(f"**{item.get('title', 'Bilinmiyor')}**")
+                    content_label = "🎬 Film" if item.get("content_type") == "movie" else "📺 Dizi"
+                    st.caption(content_label)
+                    if st.button("↩️ Geri Al", key=f"undo_disliked_{idx}_{item.get('id')}", width="stretch"):
+                        feedback_manager.unmark(item.get("id"))
+                        st.toast(f"↩️ '{item.get('title')}' tekrar gösterilecek.")
+                        st.rerun()
+                    st.divider()
+
+
 # =============================================================================
 # ANA SAYFA (ÇARK + TEK FİLTRE PANELİ)
 # =============================================================================
 
-@st.dialog("🎉 Çarktan çıkan film", width="small")
-def _show_winner_dialog(winner: dict, fav_manager: FavoritesManager, tmdb: TMDBClient) -> None:
+@st.dialog("🎉 Seçilen Film", width="small")
+def _show_winner_dialog(
+    winner: dict,
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
+    mode: str = "wheel",
+) -> None:
     """Kazanan içeriği ekranın tam ortasında bir modal pencerede göster."""
     st.image(winner.get("poster_url") or TMDBClient.PLACEHOLDER_POSTER, width="stretch")
     st.markdown(f"### {winner.get('title', 'Bilinmiyor')}")
@@ -590,6 +722,81 @@ def _show_winner_dialog(winner: dict, fav_manager: FavoritesManager, tmdb: TMDBC
     else:
         st.caption("📺 Bu içerik için Türkiye'de platform bilgisi bulunamadı.")
 
+    try:
+        trailer_key = tmdb.get_trailer_key(winner.get("id"), winner.get("content_type", "movie"))
+    except Exception:
+        trailer_key = None
+
+    if trailer_key:
+        with st.expander("🎬 Fragmanı İzle"):
+            st.video(f"https://www.youtube.com/watch?v={trailer_key}")
+            st.caption(f"Gömülü oynatıcı çalışmazsa (bazı Google hesabı/ağ kısıtlamalarında olabiliyor): [YouTube'da aç](https://www.youtube.com/watch?v={trailer_key})")
+
+    with st.expander("📤 Paylaş"):
+        cta_text = "Çarkı sen de çevir!" if mode == "wheel" else "Sen de bir kart çek!"
+        share_image = generate_share_card(winner, cta_text=cta_text)
+        clapper_emoji = "\U0001F3AC"  # 🎬 — dosya kodlaması bozulmalarına karşı Unicode kaçış kodu kullanıyoruz
+        share_caption = f"Bana bu film çıktı! {clapper_emoji} {winner.get('title', 'Bilinmiyor')}"
+
+        if share_image:
+            st.image(share_image, width="stretch")
+
+            # Native paylaşım: tarayıcı destekliyorsa (çoğunlukla mobil
+            # Chrome/Safari) gerçek görseli doğrudan WhatsApp/Instagram gibi
+            # uygulamalara "resim" olarak gönderir — link değil, dosyanın
+            # kendisi. Masaüstü tarayıcılarda genelde desteklenmez, bu durumda
+            # aşağıdaki "İndir" butonuyla elle paylaşmak gerekir.
+            image_b64 = base64.b64encode(share_image).decode("utf-8")
+            share_caption_js = json.dumps(share_caption)
+            st.iframe(
+                f"""
+                <div style="font-family: -apple-system, sans-serif;">
+                <button id="native-share-btn" style="
+                    width: 100%; padding: 10px; border-radius: 8px;
+                    background: #e50914; color: white; border: none;
+                    font-size: 14px; font-weight: 600; cursor: pointer;
+                ">📱 Görseli Doğrudan Paylaş (WhatsApp/Instagram vb.)</button>
+                <p id="native-share-fallback" style="display:none; color:#999; font-size:12px; margin-top:8px;">
+                    Bu tarayıcı doğrudan resim paylaşımını desteklemiyor — lütfen aşağıdaki "İndir" butonunu kullan.
+                </p>
+                <script>
+                document.getElementById('native-share-btn').addEventListener('click', async () => {{
+                    try {{
+                        const byteCharacters = atob("{image_b64}");
+                        const byteNumbers = new Array(byteCharacters.length);
+                        for (let i = 0; i < byteCharacters.length; i++) {{
+                            byteNumbers[i] = byteCharacters.charCodeAt(i);
+                        }}
+                        const byteArray = new Uint8Array(byteNumbers);
+                        const file = new File([byteArray], "cineroulette.png", {{ type: "image/png" }});
+
+                        if (navigator.canShare && navigator.canShare({{ files: [file] }})) {{
+                            await navigator.share({{ files: [file], text: {share_caption_js} }});
+                        }} else {{
+                            document.getElementById('native-share-fallback').style.display = 'block';
+                        }}
+                    }} catch (e) {{
+                        document.getElementById('native-share-fallback').style.display = 'block';
+                    }}
+                }});
+                </script>
+                </div>
+                """,
+                height=70,
+            )
+
+            safe_title = "".join(c for c in winner.get("title", "film") if c.isalnum() or c in " _-").strip() or "film"
+            st.download_button(
+                "📥 Görseli İndir",
+                data=share_image,
+                file_name=f"{safe_title}_cineroulette.png",
+                mime="image/png",
+                key="download_share_card",
+                width="stretch",
+            )
+        else:
+            st.caption("Paylaşım görseli oluşturulamadı.")
+
     is_fav = fav_manager.is_favorite(winner.get("id"))
     btn_text = "❤️ Zaten Favorilerde" if is_fav else "❤️ Favorilere Ekle"
     if st.button(btn_text, key="dialog_wheel_result_fav", width="stretch"):
@@ -598,8 +805,143 @@ def _show_winner_dialog(winner: dict, fav_manager: FavoritesManager, tmdb: TMDBC
             st.toast(f"❤️ {winner.get('title')} favorilere eklendi!")
             st.rerun()
 
+    winner_id = winner.get("id")
+    if feedback_manager.is_watched(winner_id):
+        st.success("Beğendin", icon="✅")
+    elif feedback_manager.is_disliked(winner_id):
+        st.error("Beğenmedin", icon="🚫")
+    else:
+        fb_col1, fb_col2 = st.columns(2)
+        with fb_col1:
+            if st.button("✅ Beğendim", key="dialog_watched", width="stretch"):
+                feedback_manager.mark_watched(winner)
+                st.toast(f"✅ '{winner.get('title')}' beğendiğin olarak kaydedildi.")
+                st.rerun()
+        with fb_col2:
+            if st.button("🚫 Beğenmedim", key="dialog_disliked", width="stretch"):
+                feedback_manager.mark_disliked(winner)
+                if is_fav:
+                    fav_manager.remove(winner_id)
+                st.toast(f"🚫 '{winner.get('title')}' bir daha önerilmeyecek.")
+                st.rerun()
 
-def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager) -> None:
+
+def _render_card_deck(items: list[dict], fav_manager: FavoritesManager, feedback_manager: FeedbackManager, tmdb: TMDBClient) -> None:
+    """
+    Yüzü kapalı kart destesi — çarka alternatif bir seçim ritüeli.
+    Kullanıcı 8 karttan birini seçer, o kart anında açılıp (çarktaki gibi
+    merkezi pop-up ile) sonucu gösterir. Çarkın aksine bekleme animasyonu
+    olmadığı için sonuç gecikmesiz gösteriliyor.
+
+    Kartlar, gerçek bir iskambil destesi gibi hafifçe yelpaze açılmış
+    (döndürülmüş ve üst üste binmiş) şekilde gösteriliyor — bunu
+    `st.container(key=...)` ile elde ediyoruz, çünkü Streamlit bu durumda
+    otomatik olarak `st-key-<key>` CSS sınıfı üretiyor ve biz de bu sınıfı
+    hedefleyerek SADECE bu deste bloğuna özel stil veriyoruz (sayfadaki
+    diğer sütun/buton düzenlerini etkilemiyor).
+    """
+    st.session_state.setdefault("deck_seed", 0)
+
+    deck_items = items[:8]
+
+    st.markdown('<div class="section-title" style="text-align:center;">🃏 Kart Destesi</div>', unsafe_allow_html=True)
+    st.caption("Bir kart seç, açılsın — hangi film çıkacağını önceden bilmiyorsun.")
+
+    # Sadece bu deste bloğuna özel yelpaze (fan) stili.
+    st.markdown(
+        """
+        <style>
+        .st-key-card_deck_fan {
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 0 !important;
+            padding: 20px 0 28px;
+        }
+        .st-key-card_deck_fan > div {
+            margin-left: -28px;
+            transition: transform 0.15s ease, z-index 0s;
+        }
+        .st-key-card_deck_fan > div:first-child { margin-left: 0; }
+        .st-key-card_deck_fan button {
+            width: 80px !important;
+            height: 118px !important;
+            padding: 8px !important;
+            border-radius: 10px 10px 12px 12px !important;
+            border: 1.5px solid #4a4a4a !important;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            overflow: hidden;
+            color: transparent !important;
+            background-color: #141414 !important;
+            background-image:
+                repeating-linear-gradient(45deg, #2a2a2a 0, #2a2a2a 3px, transparent 3px, transparent 10px),
+                repeating-linear-gradient(-45deg, #2a2a2a 0, #2a2a2a 3px, transparent 3px, transparent 10px),
+                linear-gradient(160deg, #831010, #e50914 40%, #831010 70%) !important;
+            background-size: 100% 100%, 100% 100%, 100% 100% !important;
+            position: relative;
+        }
+        /* Dar (mobil) ekranlarda kartları küçültüp örtüşmeyi azaltıyoruz,
+           böylece 8 kart yatayda taşmadan sığıyor. */
+        @media (max-width: 480px) {
+            .st-key-card_deck_fan button {
+                width: 46px !important;
+                height: 70px !important;
+            }
+            .st-key-card_deck_fan > div {
+                margin-left: -16px;
+            }
+        }
+        .st-key-card_deck_fan button::before {
+            content: "";
+            position: absolute;
+            inset: 8px;
+            border: 1.5px solid rgba(255,255,255,0.55);
+            border-radius: 5px;
+            pointer-events: none;
+        }
+        .st-key-card_deck_fan button:hover {
+            border-color: #f5c518 !important;
+            box-shadow: 0 8px 18px rgba(0,0,0,0.6);
+        }
+        .st-key-card_deck_fan > div:nth-child(1) button { transform: rotate(-18deg) translateY(14px); }
+        .st-key-card_deck_fan > div:nth-child(2) button { transform: rotate(-13deg) translateY(7px); }
+        .st-key-card_deck_fan > div:nth-child(3) button { transform: rotate(-8deg) translateY(3px); }
+        .st-key-card_deck_fan > div:nth-child(4) button { transform: rotate(-3deg); }
+        .st-key-card_deck_fan > div:nth-child(5) button { transform: rotate(3deg); }
+        .st-key-card_deck_fan > div:nth-child(6) button { transform: rotate(8deg) translateY(3px); }
+        .st-key-card_deck_fan > div:nth-child(7) button { transform: rotate(13deg) translateY(7px); }
+        .st-key-card_deck_fan > div:nth-child(8) button { transform: rotate(18deg) translateY(14px); }
+        .st-key-card_deck_fan > div:hover button {
+            transform: translateY(-18px) scale(1.08) !important;
+            z-index: 20;
+            position: relative;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    clicked_item = None
+    with st.container(key="card_deck_fan", horizontal=True):
+        for i, item in enumerate(deck_items):
+            key = f"deck_card_{st.session_state['deck_seed']}_{i}"
+            if st.button("🂠", key=key, help=f"{i + 1}. kart"):
+                clicked_item = item
+
+    col_a, col_b, col_c = st.columns([1, 1.4, 1])
+    with col_b:
+        st.caption(f"🂡 Deste #{st.session_state['deck_seed'] + 1}")
+        if st.button("🔄 Yeni Deste Karıştır", key="deck_reshuffle_btn", width="stretch"):
+            st.session_state["deck_seed"] += 1
+            st.toast("🔀 Deste karıştırıldı!")
+            st.rerun()
+
+    if clicked_item is not None:
+        _show_winner_dialog(clicked_item, fav_manager, feedback_manager, tmdb, mode="cards")
+
+
+def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_manager: FeedbackManager) -> None:
     """Filtre paneli + ortada çark + genişletilebilir tam sonuç listesi."""
 
     mood_options = list(MOOD_FILTERS.keys())
@@ -646,7 +988,7 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager) -> None:
         # sadece favoriler kullanılıyor, aşağıdaki filtreler gizleniyor.
         if filter_mode == "favorites":
             fav_count = fav_manager.get_count()
-            st.caption(f"❤️ {fav_count} favorin arasından çark dönecek.")
+            st.caption(f"❤️ {fav_count} favorin arasından seçim yapılacak.")
             rating_range = (0.0, 10.0)
             year_range = (1950, datetime.date.today().year)
             content_type = "movie"
@@ -722,15 +1064,24 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager) -> None:
                 random_mode=random_mode,
             )
 
+    # "İzledim" veya "Bu değildi" olarak işaretlenmiş içerikler, hangi
+    # modda olursak olalım havuzdan çıkarılıyor — bir daha karşımıza çıkmasınlar.
+    pool_before_feedback = len(pool)
+    pool = feedback_manager.filter_pool(pool)
+    excluded_count = pool_before_feedback - len(pool)
+
     if filter_mode == "favorites":
         if not pool:
-            st.info(
-                "📭 Henüz favori eklememişsin.\n\n"
-                "Bir mod veya tür seçip beğendiğin içerikleri **'Favorilere Ekle'** "
-                "ile listene ekleyebilir, sonra buradan çevirebilirsin."
-            )
+            if pool_before_feedback > 0:
+                st.info("📭 Favorilerindeki her şeyi beğenmemiş görünüyorsun. Yeni favoriler ekle!")
+            else:
+                st.info(
+                    "📭 Henüz favori eklememişsin.\n\n"
+                    "Bir mod veya tür seçip beğendiğin içerikleri **'Favorilere Ekle'** "
+                    "ile listene ekleyebilir, sonra buradan çevirebilirsin."
+                )
             return
-        st.caption(f"❤️ Favorilerinden çark dönüyor ({total_results} favori).")
+        st.caption(f"❤️ Favorilerinden seçim yapılıyor ({total_results} favori).")
     elif random_mode:
         st.caption(f"🎲 Rastgele mod: ruh hali/tür seçimlerin yok sayılıyor, kaliteli içerik havuzundan rastgele seçiliyor ({total_results} sonuç).")
     elif not selected_moods and not selected_genres:
@@ -741,54 +1092,69 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager) -> None:
         if mood_keyword_ids:
             st.caption("🔍 Tek ruh hali seçili olduğu için tür eşleşmesinin ötesinde, o temaya uygun anahtar kelimeyle de daraltıldı (ör. gerçekten 'hüzünlü' etiketli filmler).")
 
+    if excluded_count > 0:
+        st.caption(f"🚫 {excluded_count} içerik beğenmediğin için gizlendi.")
+
     wheel_items = random.sample(pool, min(20, len(pool))) if pool else []
 
     st.session_state.setdefault("spin_seed", 0)
     st.session_state.setdefault("wheel_winner", None)
 
     if len(wheel_items) < 2:
-        st.warning("🔍 Çark için yeterli sonuç yok. Filtreleri biraz gevşetmeyi dene.")
+        st.warning("🔍 Seçim için yeterli sonuç yok. Filtreleri biraz gevşetmeyi dene.")
         return
 
     wcol1, wcol2, wcol3 = st.columns([1, 2, 1])
     with wcol2:
-        st.markdown('<div class="section-title" style="text-align:center;">🎰 Film Çarkı</div>', unsafe_allow_html=True)
-
-        spin_clicked = st.button("🎰 Çarkı Çevir!", width="stretch", type="primary")
-
-        if spin_clicked:
-            st.session_state.wheel_winner = random.choice(wheel_items)
-            st.session_state.spin_seed += 1
-
-        winning_index = None
-        autoplay = False
-        winner = st.session_state.wheel_winner
-        if winner is not None:
-            try:
-                winning_index = wheel_items.index(winner)
-                autoplay = spin_clicked
-            except ValueError:
-                winner = None
-                st.session_state.wheel_winner = None
-
-        render_roulette_wheel(
-            wheel_items,
-            winning_index=winning_index,
-            autoplay=autoplay,
-            spin_seed=st.session_state.spin_seed,
+        selection_mode = st.radio(
+            "Nasıl seçelim?",
+            options=["wheel", "cards"],
+            format_func=lambda k: "🎡 Çark" if k == "wheel" else "🃏 Kart Çek",
+            horizontal=True,
+            key="selection_mode",
         )
+        st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
 
-        if spin_clicked and winner is not None:
-            # Çark ~4 saniyelik bir CSS animasyonuyla dönüyor (tarayıcıda,
-            # iframe içinde). Kazananı hemen göstermek yerine kısa bir
-            # bekleme koyup afişin çark tamamen durmadan ekrana düşmesini
-            # engelliyoruz.
-            with st.spinner("Çark dönüyor..."):
-                time.sleep(3.2)
-            _show_winner_dialog(winner, fav_manager, tmdb)
+        if selection_mode == "cards":
+            _render_card_deck(wheel_items, fav_manager, feedback_manager, tmdb)
+        else:
+            st.markdown('<div class="section-title" style="text-align:center;">🎰 Film Çarkı</div>', unsafe_allow_html=True)
+
+            spin_clicked = st.button("🎰 Çarkı Çevir!", width="stretch", type="primary")
+
+            if spin_clicked:
+                st.session_state.wheel_winner = random.choice(wheel_items)
+                st.session_state.spin_seed += 1
+
+            winning_index = None
+            autoplay = False
+            winner = st.session_state.wheel_winner
+            if winner is not None:
+                try:
+                    winning_index = wheel_items.index(winner)
+                    autoplay = spin_clicked
+                except ValueError:
+                    winner = None
+                    st.session_state.wheel_winner = None
+
+            render_roulette_wheel(
+                wheel_items,
+                winning_index=winning_index,
+                autoplay=autoplay,
+                spin_seed=st.session_state.spin_seed,
+            )
+
+            if spin_clicked and winner is not None:
+                # Çark ~4 saniyelik bir CSS animasyonuyla dönüyor (tarayıcıda,
+                # iframe içinde). Kazananı hemen göstermek yerine kısa bir
+                # bekleme koyup afişin çark tamamen durmadan ekrana düşmesini
+                # engelliyoruz.
+                with st.spinner("Çark dönüyor..."):
+                    time.sleep(3.2)
+                _show_winner_dialog(winner, fav_manager, feedback_manager, tmdb, mode="wheel")
 
     _render_full_results_section(
-        tmdb, fav_manager, pool, total_results, filters_signature,
+        tmdb, fav_manager, feedback_manager, pool, total_results, filters_signature,
         mood_genre_ids, genre_genre_ids, mood_keyword_ids,
         rating_range, year_range, runtime_range,
         content_type, default_sort_label,
@@ -799,6 +1165,7 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager) -> None:
 def _render_full_results_section(
     tmdb: TMDBClient,
     fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
     pool: list[dict],
     total_results: int,
     filters_signature: tuple,
@@ -824,29 +1191,14 @@ def _render_full_results_section(
     if st.session_state.get("list_pool_sig") != filters_signature:
         st.session_state["list_pool_sig"] = filters_signature
         st.session_state["list_pool_items"] = list(pool)
-        st.session_state["list_pool_page"] = 1
 
-        # Filtre değiştiğinde, kullanıcı hiç tıklamadan bir sayfa daha
-        # (toplam ~40 sonuç) önden yüklüyoruz. Bu, "Daha fazla göster"
-        # butonuna olan ihtiyacı azaltarak sayfa kayması sorununu daha az
-        # sıklıkla yaşatıyor (kökten çözmüyor ama etkisini azaltıyor).
-        if total_results > len(pool):
-            sort_by = resolve_sort_by(default_sort_label, content_type)
-            combined_ids = list(mood_genre_ids) or list(genre_genre_ids)
-            combined_keywords = list(mood_keyword_ids) if mood_genre_ids else []
-            try:
-                extra = _discover(
-                    tmdb, combined_ids, combined_keywords,
-                    rating_range, year_range, runtime_range,
-                    sort_by, content_type, page=2,
-                )
-                existing_ids = {item.get("id") for item in st.session_state["list_pool_items"]}
-                st.session_state["list_pool_items"].extend(
-                    item for item in extra if item.get("id") not in existing_ids
-                )
-                st.session_state["list_pool_page"] = 2
-            except Exception:
-                pass  # Ön yükleme başarısız olursa sessizce 1. sayfayla devam
+        # `pool` artık fetch_filtered_pool içinde çeşitliliği artırmak için
+        # zaten en fazla 3 sayfaya (60 sonuca) kadar önden getiriliyor, bu
+        # yüzden burada ayrıca bir sayfa daha çekmeye gerek yok — bu sadece
+        # aynı sayfayı tekrar isteyip israf ederdi. "Daha fazla göster"
+        # butonu, zaten kapsanan sayfalardan hemen sonrasından devam etsin
+        # diye kabaca kaç sayfanın karşılandığını tahmin ediyoruz.
+        st.session_state["list_pool_page"] = max(1, -(-len(pool) // 20))  # yukarı yuvarlama
 
     st.session_state.setdefault("list_pool_items", list(pool))
     st.session_state.setdefault("list_pool_page", 1)
@@ -875,7 +1227,7 @@ def _render_full_results_section(
         else:
             sorted_pool = display_pool
 
-        display_content_grid(sorted_pool, fav_manager, show_similarity=False, key_prefix="home")
+        display_content_grid(sorted_pool, fav_manager, feedback_manager, show_similarity=False, key_prefix="home")
 
         max_pages = 10  # TMDB'yi gereksiz zorlamamak için makul bir tavan
         can_load_more = len(display_pool) < total_results and st.session_state["list_pool_page"] < max_pages
@@ -921,7 +1273,7 @@ def main():
         <div class="main-header">
             <div>
                 <h1>Cine<span>Roulette</span></h1>
-                <p>Ne izleyeceğine karar veremedin mi? Çarkı çevir.</p>
+                <p>Ne izleyeceğine karar veremedin mi? Çarkı çevir ya da bir kart çek.</p>
             </div>
         </div>
         """,
@@ -996,11 +1348,14 @@ def main():
 
     ml_engine = init_ml_engine()
     fav_manager = init_favorites_manager()
+    feedback_manager = init_feedback_manager()
 
-    tab_home, tab_ai, tab_favorites = st.tabs(["🎰 Anasayfa", "🤖 AI Önerileri", "❤️ Favorilerim"])
+    tab_home, tab_ai, tab_favorites, tab_feedback = st.tabs(
+        ["🎰 Anasayfa", "🤖 AI Önerileri", "❤️ Favorilerim", "👍👎 Geri Bildirimlerim"]
+    )
 
     with tab_home:
-        render_home_tab(tmdb, fav_manager)
+        render_home_tab(tmdb, fav_manager, feedback_manager)
 
     with tab_ai:
         st.markdown('<div class="section-title">🤖 Senin İçin Öneriler</div>', unsafe_allow_html=True)
@@ -1034,21 +1389,25 @@ def main():
 
             if compute_clicked:
                 with st.spinner("Öneriler hesaplanıyor..."):
-                    st.session_state.ai_recommendations = fetch_ai_recommendations(
+                    recs = fetch_ai_recommendations(
                         tmdb=tmdb,
                         ml_engine=ml_engine,
                         favorites=favorites,
                         content_type=ai_content_type,
                     )
+                    st.session_state.ai_recommendations = feedback_manager.filter_pool(recs)
                     st.session_state.ai_recommendations_key = cache_key
 
             if st.session_state.ai_recommendations_key != cache_key:
                 st.info("Favorilerin veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
             elif st.session_state.ai_recommendations is not None:
-                display_content_grid(st.session_state.ai_recommendations, fav_manager, show_similarity=True, key_prefix="ai")
+                display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, show_similarity=True, key_prefix="ai")
 
     with tab_favorites:
-        display_favorites_page(fav_manager)
+        display_favorites_page(tmdb, fav_manager, feedback_manager)
+
+    with tab_feedback:
+        display_feedback_page(fav_manager, feedback_manager)
 
 
 if __name__ == "__main__":

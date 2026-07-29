@@ -37,15 +37,6 @@ MOOD_FILTERS: dict[str, FilterConfig] = {
         min_vote_average=7.0,
         min_vote_count=500,
     ),
-    "kafa_dagitmalik": FilterConfig(
-        icon="😄",
-        label="Kafa Dağıtmalık",
-        description="Eğlenceli ve hafif içerikler.",
-        genre_ids=[35],  # Komedi
-        keyword_ids=[304995],  # feel-good (TMDB'de doğrulanmış keyword ID)
-        min_vote_average=6.0,
-        min_vote_count=300,
-    ),
     "heyecan_lazim": FilterConfig(
         icon="🔥",
         label="Heyecan Lazım",

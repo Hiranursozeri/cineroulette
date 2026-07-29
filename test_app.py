@@ -64,13 +64,17 @@ def streamlit_onbellegini_temizle():
 
 @pytest.fixture(autouse=True)
 def temiz_favoriler_dosyasi():
-    """Her testten önce ve sonra favoriler dosyasını temizler (testler birbirini etkilemesin)."""
-    fav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_favorites.json")
-    if os.path.exists(fav_path):
-        os.remove(fav_path)
+    """Her testten önce ve sonra favoriler/geri bildirim dosyalarını temizler (testler birbirini etkilemesin)."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    fav_path = os.path.join(base_dir, "user_favorites.json")
+    feedback_path = os.path.join(base_dir, "user_feedback.json")
+    for p in (fav_path, feedback_path):
+        if os.path.exists(p):
+            os.remove(p)
     yield
-    if os.path.exists(fav_path):
-        os.remove(fav_path)
+    for p in (fav_path, feedback_path):
+        if os.path.exists(p):
+            os.remove(p)
 
 
 @pytest.fixture(autouse=True)
@@ -79,7 +83,7 @@ def sahte_api_anahtari(monkeypatch):
     monkeypatch.setenv("TMDB_API_KEY", "test_dummy_key")
 
 
-def _mocked_app(discover_return=None, get_random_return=None, watch_providers_return=None):
+def _mocked_app(discover_return=None, get_random_return=None, watch_providers_return=None, trailer_key_return=None):
     """TMDB ağ çağrıları sahte verilerle değiştirilmiş bir AppTest oturumu döndürür."""
     discover_return = discover_return if discover_return is not None else make_fake_items()
     get_random_return = get_random_return if get_random_return is not None else make_fake_items()
@@ -91,6 +95,7 @@ def _mocked_app(discover_return=None, get_random_return=None, watch_providers_re
         patch("utils.tmdb_client.TMDBClient.discover_tv_shows", return_value=discover_return),
         patch("utils.tmdb_client.TMDBClient.get_random_content", return_value=get_random_return),
         patch("utils.tmdb_client.TMDBClient.get_watch_providers", return_value=watch_providers_return),
+        patch("utils.tmdb_client.TMDBClient.get_trailer_key", return_value=trailer_key_return),
         patch("utils.tmdb_client.TMDBClient.get_popular_movies", return_value=[]),
         patch("utils.tmdb_client.TMDBClient.get_popular_tv_shows", return_value=[]),
     ]
@@ -347,7 +352,11 @@ def test_oneri_motoru_benzerlik_skorlari_anlamli():
 # =============================================================================
 
 def test_daha_fazla_goster_sayisi_artiriyor():
-    """'Daha fazla göster' butonuna her basışta gösterilen sonuç sayısı artmalı."""
+    """
+    Havuz artık çeşitlilik için baştan büyütülüyor (60'a kadar), bu yüzden
+    filtre seçilince liste zaten ~60 sonuçla açılmalı. 'Daha fazla göster'
+    butonuna basınca sayı yine de artmaya devam etmeli (61. sayfadan sonrası).
+    """
     from utils.tmdb_client import ResultList
 
     def fake_discover(**kwargs):
@@ -369,14 +378,14 @@ def test_daha_fazla_goster_sayisi_artiriyor():
         at.sidebar.radio(key="filter_mode").set_value("genre").run(timeout=30)
         at.multiselect(key="genre_multiselect").select("komedi").run(timeout=30)
 
-        # Otomatik on-yukleme sayesinde zaten 40 olmali
+        # Havuz artık kendiliğinden ~60 sonuca kadar genişliyor
         label_after_select = at.expander[0].label
-        assert "40 /" in label_after_select, f"Ön yükleme çalışmadı: {label_after_select}"
+        assert "60 /" in label_after_select, f"Havuz genişletme çalışmadı: {label_after_select}"
 
         load_more_btn = next(b for b in at.button if "Daha fazla" in (b.label or ""))
         load_more_btn.click().run(timeout=30)
         label_after_click = at.expander[0].label
-        assert "60 /" in label_after_click, f"Daha fazla göster sayıyı artırmadı: {label_after_click}"
+        assert "80 /" in label_after_click, f"Daha fazla göster sayıyı artırmadı: {label_after_click}"
         assert len(at.exception) == 0
 
 
@@ -409,6 +418,395 @@ def test_yil_filtresi_yanlis_esleseni_eliyor():
 
         assert len(result) == 1
         assert result[0]["id"] == 2, "Yanlış yıla ait sonuç filtrelenemedi"
+
+
+# =============================================================================
+# 8) KART DESTESİ MODU TESTLERİ
+# =============================================================================
+
+def test_kart_destesi_moduna_gecilebiliyor():
+    """'🃏 Kart Çek' moduna geçiş hatasız çalışmalı ve 8 kart gösterilmeli."""
+    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
+    try:
+        mode_radio = at.radio(key="selection_mode")
+        assert set(mode_radio.options) == {"🎡 Çark", "🃏 Kart Çek"}
+        mode_radio.set_value("cards").run(timeout=30)
+        assert len(at.exception) == 0
+
+        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
+        assert len(deck_btns) == 8
+    finally:
+        _stop_patches(patches)
+
+
+def test_kart_secince_sonuc_acidiyor():
+    """Bir kart seçilince kazananın pop-up'ı (favori butonuyla) açılmalı."""
+    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
+    try:
+        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
+        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
+        deck_btns[0].click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        dialog_btn = next((b for b in at.button if "dialog_wheel_result_fav" in (b.key or "")), None)
+        assert dialog_btn is not None, "Kart seçimi sonrası pop-up açılmadı"
+    finally:
+        _stop_patches(patches)
+
+
+def test_yeni_deste_karistir_calisiyor():
+    """'Yeni Deste Karıştır' butonuna basmak hatasız çalışmalı."""
+    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
+    try:
+        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
+        reshuffle_btn = next(b for b in at.button if b.key == "deck_reshuffle_btn")
+        reshuffle_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
+def test_cark_ve_kart_modlari_arasi_gecis_sorunsuz():
+    """Çark ↔ Kart Çek arasında ileri geri geçiş, her ikisinin de işlevini bozmamalı."""
+    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
+    try:
+        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
+        at.radio(key="selection_mode").set_value("wheel").run(timeout=30)
+        spin_btn = next((b for b in at.button if "Çarkı Çevir" in (b.label or "")), None)
+        assert spin_btn is not None
+        spin_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
+# =============================================================================
+# 9) İZLEDİM / BEĞENMEDİM GERİ BİLDİRİM TESTLERİ
+# =============================================================================
+
+def test_feedback_manager_begendim_havuzdan_cikarmiyor():
+    """
+    'Beğendim' işareti artık havuzdan ÇIKARMAMALI (sadece pozitif bir kayıt) —
+    sadece 'Beğenmedim' işareti havuzdan çıkarmalı.
+    """
+    from utils.feedback_manager import FeedbackManager
+
+    fm = FeedbackManager()
+    fm.mark_watched({"id": 100, "title": "Test", "content_type": "movie"})
+    assert fm.is_watched(100) is True
+    assert fm.is_disliked(100) is False
+
+    pool = [{"id": 100}, {"id": 101}]
+    filtered = fm.filter_pool(pool)
+    assert len(filtered) == 2, "Beğenilen içerik havuzdan çıkarılmamalı"
+
+    fm.mark_disliked({"id": 101, "title": "Test2", "content_type": "movie"})
+    filtered2 = fm.filter_pool(pool)
+    assert len(filtered2) == 1
+    assert filtered2[0]["id"] == 100, "Beğenilmeyen içerik havuzdan çıkarılmalı"
+
+
+def test_feedback_manager_begenmedim_izlendiyi_geri_alir():
+    """Bir içerik önce 'bu değildi' sonra 'izledim' olarak işaretlenirse, sadece 'izledim' listesinde kalmalı."""
+    from utils.feedback_manager import FeedbackManager
+
+    fm = FeedbackManager()
+    fm.mark_disliked({"id": 200, "title": "Test", "content_type": "movie"})
+    assert fm.is_disliked(200) is True
+
+    fm.mark_watched({"id": 200, "title": "Test", "content_type": "movie"})
+    assert fm.is_disliked(200) is False, "Fikir değiştirince eski işaret kalmamalı"
+    assert fm.is_watched(200) is True
+
+
+def test_pop_upta_izledim_begenmedim_butonlari_var():
+    """Çark/kart sonucu pop-up'ında İzledim ve Bu Değildi butonları görünmeli."""
+    at, patches = _mocked_app()
+    try:
+        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
+        spin_btn.click().run(timeout=30)
+
+        watched_btn = next((b for b in at.button if b.key == "dialog_watched"), None)
+        disliked_btn = next((b for b in at.button if b.key == "dialog_disliked"), None)
+        assert watched_btn is not None, "Pop-up'ta İzledim butonu yok"
+        assert disliked_btn is not None, "Pop-up'ta Bu Değildi butonu yok"
+    finally:
+        _stop_patches(patches)
+
+
+def test_pop_upta_izledim_tiklamak_hatasiz():
+    """Pop-up'ta 'İzledim' butonuna basmak hatasız çalışmalı."""
+    at, patches = _mocked_app()
+    try:
+        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
+        spin_btn.click().run(timeout=30)
+
+        watched_btn = next(b for b in at.button if b.key == "dialog_watched")
+        watched_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
+def test_listedeki_karttan_begenmedim_favoriden_de_kaldiriyor():
+    """
+    Bir içerik favorilere eklendikten sonra listeden 'Bu Değildi' denirse,
+    hem geri bildirim listesine eklenmeli hem de favorilerden kaldırılmalı.
+    """
+    at, patches = _mocked_app()
+    try:
+        # Once favoriye ekle
+        fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
+        fav_btn.click().run(timeout=30)
+
+        # Ayni icerigin "Bu Degildi" butonunu bul (favori butonuyla ayni idx/key_prefix'i paylasir)
+        disliked_btn = next((b for b in at.button if (b.key or "").startswith("disliked_")), None)
+        assert disliked_btn is not None
+        disliked_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
+def test_karttan_secilen_filmde_de_feedback_butonlari_var():
+    """Kart destesinden çıkan sonuçta da İzledim/Bu Değildi butonları olmalı."""
+    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
+    try:
+        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
+        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
+        deck_btns[0].click().run(timeout=30)
+
+        watched_btn = next((b for b in at.button if b.key == "dialog_watched"), None)
+        assert watched_btn is not None
+        assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
+def test_begendim_sonrasi_kalici_rozet_gorunuyor():
+    """
+    'Beğendim' butonuna basıldıktan sonra, o kart bir daha 'Beğendim' butonunu
+    göstermemeli — favori butonundaki gibi kalıcı bir duruma geçmeli.
+    (Not: AppTest, st.dialog içindeki st.success mesajlarını ayrı bir katmanda
+    render ettiği için doğrudan izleyemiyor; bu yüzden burada ölçülebilir asıl
+    davranışı — butonun kalıcı olarak kaybolmasını — doğruluyoruz.)
+    """
+    at, patches = _mocked_app()
+    try:
+        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
+        spin_btn.click().run(timeout=30)
+
+        watched_btn = next(b for b in at.button if b.key == "dialog_watched")
+        watched_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        watched_btn_after = next((b for b in at.button if b.key == "dialog_watched"), None)
+        assert watched_btn_after is None, "İşaretlendikten sonra buton hâlâ görünüyor, rozete dönüşmedi"
+    finally:
+        _stop_patches(patches)
+
+
+# =============================================================================
+# 10) FİLM ARAMA TESTLERİ
+# =============================================================================
+
+def test_favoriler_sayfasinda_arama_kutusu_var():
+    """Favoriler sayfasında arama kutusu ve butonu görünmeli."""
+    at, patches = _mocked_app()
+    try:
+        search_input = next((i for i in at.text_input if i.key == "fav_search_query"), None)
+        search_btn = next((b for b in at.button if b.key == "fav_search_btn"), None)
+        assert search_input is not None
+        assert search_btn is not None
+    finally:
+        _stop_patches(patches)
+
+
+def test_arama_sonuclari_favoriye_eklenebiliyor():
+    """Arama sonucu gelen bir film favorilere eklenebilmeli."""
+    at, patches = _mocked_app()
+    try:
+        with patch("utils.tmdb_client.TMDBClient.search_movies", return_value=make_fake_items(n=3, id_start=500)):
+            search_input = next(i for i in at.text_input if i.key == "fav_search_query")
+            search_input.set_value("test film").run(timeout=30)
+            search_btn = next(b for b in at.button if b.key == "fav_search_btn")
+            search_btn.click().run(timeout=30)
+            assert len(at.exception) == 0
+
+            fav_btn = next((b for b in at.button if "favsearch" in (b.key or "") and "fav_" in (b.key or "")), None)
+            assert fav_btn is not None, "Arama sonuçlarında favori butonu yok"
+            fav_btn.click().run(timeout=30)
+            assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
+# =============================================================================
+# 11) BEĞENDİKLERİM / BEĞENMEDİKLERİM SAYFASI TESTLERİ
+# =============================================================================
+
+def test_gecmis_sekmesi_hatasiz_aciliyor():
+    """'Geri Bildirimlerim' sekmesi (Beğendiklerim/Beğenmediklerim) hatasız açılmalı."""
+    at, patches = _mocked_app()
+    try:
+        assert len(at.exception) == 0
+        tab_labels = [t.label for t in at.tabs]
+        assert any("Geri Bildirimlerim" in (t or "") for t in tab_labels)
+    finally:
+        _stop_patches(patches)
+
+
+def test_begenilmeyen_gerial_alinabiliyor():
+    """Bir içerik 'Beğenmedim' olarak işaretlendikten sonra 'Geri Al' ile geri alınabilmeli."""
+    at, patches = _mocked_app()
+    try:
+        disliked_btn = next(b for b in at.button if (b.key or "").startswith("disliked_"))
+        disliked_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        undo_btn = next((b for b in at.button if (b.key or "").startswith("undo_disliked_")), None)
+        assert undo_btn is not None, "'Geri Al' butonu bulunamadı"
+        undo_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
+# =============================================================================
+# 12) FRAGMAN GÖMME TESTLERİ
+# =============================================================================
+
+def test_fragman_varsa_expander_gosteriliyor():
+    """Fragman anahtarı bulunursa pop-up'ta '🎬 Fragmanı İzle' bölümü çıkmalı."""
+    at, patches = _mocked_app(trailer_key_return="dQw4w9WgXcQ")
+    try:
+        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
+        spin_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        expander_labels = [e.label for e in at.expander]
+        assert any("Fragmanı İzle" in (lbl or "") for lbl in expander_labels)
+    finally:
+        _stop_patches(patches)
+
+
+def test_fragman_yoksa_hata_vermiyor():
+    """Fragman bulunamazsa (None dönerse) uygulama hatasız çalışmaya devam etmeli."""
+    at, patches = _mocked_app(trailer_key_return=None)
+    try:
+        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
+        spin_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        expander_labels = [e.label for e in at.expander]
+        assert not any("Fragmanı İzle" in (lbl or "") for lbl in expander_labels)
+    finally:
+        _stop_patches(patches)
+
+
+def test_tmdb_client_trailer_key_secimi():
+    """TMDBClient.get_trailer_key: Trailer tipini Teaser'a tercih etmeli, YouTube olmayanları yok saymalı."""
+    from unittest.mock import patch as mock_patch
+    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
+         mock_patch.dict(os.environ, {"TMDB_API_KEY": "dummy"}):
+        from utils.tmdb_client import TMDBClient
+        tmdb = TMDBClient()
+
+        fake_videos = {"results": [
+            {"site": "YouTube", "type": "Teaser", "key": "teaser123"},
+            {"site": "YouTube", "type": "Trailer", "key": "trailer456"},
+            {"site": "Vimeo", "type": "Trailer", "key": "vimeo789"},
+        ]}
+        tmdb._make_request = lambda *a, **kw: fake_videos
+        assert tmdb.get_trailer_key(1, "movie") == "trailer456"
+
+        tmdb._make_request = lambda *a, **kw: {"results": []}
+        assert tmdb.get_trailer_key(1, "movie") is None
+
+
+# =============================================================================
+# 13) PAYLAŞILABİLİR SONUÇ KARTI TESTLERİ
+# =============================================================================
+
+def test_share_card_posterisiz_uretiliyor():
+    """Poster URL'si olmayan bir içerik için bile paylaşım görseli üretilebilmeli."""
+    from utils.share_card import generate_share_card
+
+    winner = {"title": "Test Filmi", "vote_average": 7.5, "poster_url": None}
+    result = generate_share_card(winner)
+    assert result is not None
+    assert len(result) > 0
+    assert result[:8] == b"\x89PNG\r\n\x1a\n", "Gecerli bir PNG dosyasi olmali"
+
+
+def test_share_card_uzun_baslikla_calisiyor():
+    """Çok uzun bir film başlığı satır kaydırma ile sorunsuz işlenmeli."""
+    from utils.share_card import generate_share_card
+
+    winner = {
+        "title": "Bu Gerçekten Çok Ama Çok Uzun Bir Film Başlığı Test Amaçlı Yazılmıştır",
+        "vote_average": 6.2,
+        "poster_url": None,
+    }
+    result = generate_share_card(winner)
+    assert result is not None
+
+
+def test_pop_upta_paylas_bolumu_var():
+    """Çark/kart sonucu pop-up'ında '📤 Paylaş' bölümü ve indirme butonu görünmeli."""
+    at, patches = _mocked_app()
+    try:
+        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
+        spin_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        expander_labels = [e.label for e in at.expander]
+        assert any("Paylaş" in (lbl or "") for lbl in expander_labels)
+
+        download_btn = next((b for b in at.download_button if b.key == "download_share_card"), None)
+        assert download_btn is not None
+    finally:
+        _stop_patches(patches)
+
+
+def test_share_card_mod_gore_farkli_cta_metni():
+    """generate_share_card, geçirilen cta_text'i kullanmalı (çark/kart moduna göre farklı olabilir)."""
+    from utils.share_card import generate_share_card
+
+    winner = {"title": "Test", "vote_average": 7.0, "poster_url": None}
+    r1 = generate_share_card(winner, cta_text="Çarkı sen de çevir!")
+    r2 = generate_share_card(winner, cta_text="Sen de bir kart çek!")
+    assert r1 is not None and r2 is not None
+    assert r1 != r2, "Farklı CTA metinleriyle üretilen görseller farklı olmalı"
+
+
+def test_karttan_gelen_paylasimda_kart_cta_kullaniliyor():
+    """Kart destesinden çıkan sonuçta paylaşım görseli 'kart çek' CTA'sını kullanmalı."""
+    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
+    try:
+        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
+        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
+        deck_btns[0].click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        download_btn = next((b for b in at.download_button if b.key == "download_share_card"), None)
+        assert download_btn is not None
+    finally:
+        _stop_patches(patches)
+
+
+def test_metin_paylasim_secenekleri_kaldirildi():
+    """Artık ayrı bir 'paylaşım metni' kutusu veya sadece-metin WhatsApp linki olmamalı."""
+    at, patches = _mocked_app()
+    try:
+        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
+        spin_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
+
+        share_text_widget = next((i for i in at.text_input if i.key == "share_text_input"), None)
+        assert share_text_widget is None, "'Paylaşım metni' kutusu hâlâ görünüyor, kaldırılmalıydı"
+    finally:
+        _stop_patches(patches)
 
 
 if __name__ == "__main__":

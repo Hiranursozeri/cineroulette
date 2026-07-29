@@ -116,9 +116,9 @@ def create_wheel_html(
 
             .wheel-container {{
                 position: relative;
-                width: 420px;
-                height: 420px;
-                margin-bottom: 20px;
+                width: min(420px, 85vw);
+                height: min(420px, 85vw);
+                margin: 0 auto 20px;
             }}
 
             .wheel {{

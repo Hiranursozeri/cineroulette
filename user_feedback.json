@@ -1,0 +1,60 @@
+{
+  "watched": [
+    {
+      "id": 1339713,
+      "title": "Saplantı",
+      "content_type": "movie",
+      "marked_at": "2026-07-28T13:38:35.751431"
+    },
+    {
+      "id": 1275779,
+      "title": "İfşa Günü",
+      "content_type": "movie",
+      "marked_at": "2026-07-28T13:39:09.455399"
+    },
+    {
+      "id": 454639,
+      "title": "Kâinatın Hâkimleri",
+      "content_type": "movie",
+      "marked_at": "2026-07-28T13:46:48.131516"
+    },
+    {
+      "id": 1228710,
+      "title": "Star Wars: Mandalorian ve Grogu",
+      "content_type": "movie",
+      "marked_at": "2026-07-28T15:15:34.439258"
+    },
+    {
+      "id": 1081003,
+      "title": "Supergirl",
+      "content_type": "movie",
+      "marked_at": "2026-07-28T15:29:00.908996"
+    },
+    {
+      "id": 157336,
+      "title": "Yıldızlararası",
+      "content_type": "movie",
+      "marked_at": "2026-07-28T15:51:37.516119"
+    },
+    {
+      "id": 1315772,
+      "title": "Minyonlar ve Canavarlar",
+      "content_type": "movie",
+      "marked_at": "2026-07-29T09:20:31.534874"
+    },
+    {
+      "id": 1375646,
+      "title": "Koloni",
+      "content_type": "movie",
+      "marked_at": "2026-07-29T09:21:20.171515"
+    }
+  ],
+  "disliked": [
+    {
+      "id": 1368337,
+      "title": "Odyssey",
+      "content_type": "movie",
+      "marked_at": "2026-07-28T13:32:08.888538"
+    }
+  ]
+}

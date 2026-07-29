@@ -206,9 +206,9 @@ class TMDBClient:
         if max_vote_count is not None:
             params["vote_count.lte"] = max_vote_count
         if year_from is not None:
-            params["primary_release_date.gte"] = f"{year_from}-01-01"
+            params["release_date.gte"] = f"{year_from}-01-01"
         if year_to is not None:
-            params["primary_release_date.lte"] = f"{year_to}-12-31"
+            params["release_date.lte"] = f"{year_to}-12-31"
         if runtime_min is not None:
             params["with_runtime.gte"] = runtime_min
         if runtime_max is not None:
@@ -406,6 +406,43 @@ class TMDBClient:
             "rent": [p["provider_name"] for p in region_data.get("rent", [])],
             "buy": [p["provider_name"] for p in region_data.get("buy", [])],
         }
+
+    def get_trailer_key(
+        self,
+        content_id: int,
+        content_type: str,
+    ) -> Optional[str]:
+        """
+        Bir film/dizi için YouTube'daki en uygun fragmanın video anahtarını
+        (YouTube video ID'si) döndürür. Önce "Trailer" tipini, yoksa
+        "Teaser" tipini dener. Hiçbiri yoksa None döner.
+
+        NOT: `_make_request` varsayılan olarak `language=tr-TR` gönderiyor,
+        ama bu, video uç noktasında sonuçları SADECE Türkçe etiketli
+        videolarla sınırlıyor — ki TMDB'de bunlar neredeyse hiç yok
+        (gerçek fragmanların büyük çoğunluğu "en" ya da dil etiketsiz).
+        Bu yüzden burada dili özellikle geniş tutuyoruz.
+        """
+        endpoint = f"/movie/{content_id}/videos" if content_type == "movie" else f"/tv/{content_id}/videos"
+        data = self._make_request(
+            endpoint,
+            {"language": "en-US", "include_video_language": "en,tr,null"},
+        )
+
+        if not data or "results" not in data:
+            return None
+
+        videos = [v for v in data["results"] if v.get("site") == "YouTube"]
+        if not videos:
+            return None
+
+        for wanted_type in ("Trailer", "Teaser"):
+            for v in videos:
+                if v.get("type") == wanted_type:
+                    return v.get("key")
+
+        # Hiçbir Trailer/Teaser yoksa, YouTube'daki ilk videoyu dene.
+        return videos[0].get("key")
 
     # =========================================================================
     # ARAMA
