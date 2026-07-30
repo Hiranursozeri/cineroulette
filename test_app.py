@@ -961,5 +961,127 @@ def test_ruh_hali_secince_cark_gorunuyor():
         _stop_patches(patches)
 
 
+# =============================================================================
+# 17) SUPABASE ÖNBELLEK PERFORMANS TESTİ
+# =============================================================================
+
+def test_favorites_manager_supabase_onbellek_calisiyor():
+    """
+    KRİTİK: FavoritesManager artık veriyi `st.session_state`'te tuttuğu
+    için, aynı tarayıcı oturumunda birden fazla FavoritesManager ÖRNEĞİ
+    oluşturulsa bile (her yeniden yüklemede olduğu gibi), Supabase'e
+    SADECE BİR KEZ gidilmeli — sonraki tüm örnekler zaten yüklenmiş
+    veriyi bellekten kullanmalı.
+    """
+    import streamlit as st
+    from unittest.mock import patch as mock_patch
+
+    call_count = {"n": 0}
+
+    class FakeResp:
+        def __init__(self, data):
+            self.data = data
+
+    class FakeQuery:
+        def __init__(self, storage):
+            self.storage = storage
+            self._filters = {}
+
+        def select(self, cols):
+            return self
+
+        def eq(self, col, val):
+            self._filters[col] = val
+            return self
+
+        def order(self, *a, **kw):
+            return self
+
+        def execute(self):
+            call_count["n"] += 1
+            rows = [r for r in self.storage if all(r.get(k) == v for k, v in self._filters.items())]
+            return FakeResp(rows)
+
+    class FakeTable:
+        def __init__(self, storage):
+            self.storage = storage
+
+        def select(self, cols):
+            return FakeQuery(self.storage)
+
+    class FakeClient:
+        def __init__(self):
+            self._tables = {"favorites": [{"session_id": "x", "content_id": 1, "content": {"id": 1}}]}
+
+        def table(self, name):
+            return FakeTable(self._tables[name])
+
+    fake_client = FakeClient()
+
+    # Bare modda session_state onceki testlerden kalinti tutabiliyor,
+    # bu yuzden ilgili anahtarlari once temizliyoruz.
+    st.session_state["favorites"] = []
+    st.session_state["favorites_loaded_from_backend"] = False
+
+    with mock_patch("utils.favorites_manager._get_supabase_client", return_value=fake_client):
+        from utils.favorites_manager import FavoritesManager
+
+        # 20 kartlik bir liste render edilirken her karti YENI bir
+        # FavoritesManager orneginin kontrol ettigini simule ediyoruz
+        # (gercekte her rerun'da init_favorites_manager() yeni bir ornek
+        # yaratir).
+        for i in range(20):
+            fm = FavoritesManager(session_id="x")
+            fm.is_favorite(i)
+
+        assert call_count["n"] == 1, f"Önbellek çalışmıyor: 20 örnek için {call_count['n']} ağ isteği atıldı"
+
+
+# =============================================================================
+# 18) LİSTE KARTLARINDA AÇIKLAMA VE FRAGMAN TESTLERİ
+# =============================================================================
+
+def test_liste_kartinda_aciklama_gorunuyor():
+    """Sonuç listesindeki kartlarda film açıklaması (overview) görünmeli."""
+    items_with_overview = make_fake_items()
+    for item in items_with_overview:
+        item["overview"] = "Bu gerçekten uzun ve detaylı bir film açıklamasıdır, test amaçlıdır ve 160 karakteri aşabilir belki de aşmaz ama önemli değil."
+
+    at, patches = _mocked_app(discover_return=items_with_overview)
+    try:
+        caption_texts = [c.value for c in at.caption]
+        assert any("uzun ve detaylı bir film açıklaması" in (t or "") for t in caption_texts)
+    finally:
+        _stop_patches(patches)
+
+
+def test_liste_kartinda_fragman_sadece_istenince_cekiliyor():
+    """
+    Fragman, kart listesinde otomatik çekilmemeli — sadece kullanıcı
+    'Fragmanı Yükle' butonuna basınca TMDB'ye istek atılmalı (aksi halde
+    20 kartlık bir listede 20 gereksiz istek atılırdı).
+    """
+    trailer_call_count = {"n": 0}
+
+    def fake_trailer_key(*a, **kw):
+        trailer_call_count["n"] += 1
+        return "dQw4w9WgXcQ"
+
+    at, patches = _mocked_app()
+    try:
+        with patch("utils.tmdb_client.TMDBClient.get_trailer_key", side_effect=fake_trailer_key):
+            # Sayfa ilk acildiginda hicbir fragman istegi atilmamis olmali
+            assert trailer_call_count["n"] == 0, "Fragman otomatik cekilmemeliydi"
+
+            load_btn = next((b for b in at.button if (b.key or "").startswith("load_trailer_")), None)
+            assert load_btn is not None, "'Fragmanı Yükle' butonu bulunamadı"
+            load_btn.click().run(timeout=30)
+
+            assert trailer_call_count["n"] == 1, "Butona basinca tam olarak 1 istek atilmali"
+            assert len(at.exception) == 0
+    finally:
+        _stop_patches(patches)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

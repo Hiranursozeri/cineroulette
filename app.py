@@ -507,10 +507,27 @@ def fetch_ai_recommendations(
 # GÖRÜNTÜLEME
 # =============================================================================
 
+def _rerun_scoped() -> None:
+    """
+    Mümkünse sadece bulunulan fragment'ı, mümkün değilse tüm sayfayı
+    yeniden çalıştırır. Bu fonksiyon bir @st.fragment içinden çağrılırsa
+    (ör. "Tüm sonuçları listele" bölümü), sadece o bölüm yenilenir —
+    sayfanın başına atlama ve gereksiz yeniden hesaplama olmaz. Fragment
+    dışından (ör. AI önerileri, favori arama sonuçları) çağrılırsa,
+    scope="fragment" geçersiz olduğu için güvenli şekilde normal
+    (tüm sayfa) yeniden çalıştırmaya düşer.
+    """
+    try:
+        st.rerun(scope="fragment")
+    except Exception:
+        st.rerun()
+
+
 def _render_content_card_body(
     content: dict,
     fav_manager: FavoritesManager,
     feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
     show_similarity: bool,
     idx: int = 0,
     key_prefix: str = "grid",
@@ -535,11 +552,38 @@ def _render_content_card_body(
 
     st.caption(f"{rating_display} | 📅 {year}")
 
+    # Açıklama (TMDB'den zaten geldiği için ek bir istek gerektirmiyor)
+    overview = (content.get("overview") or "").strip()
+    if overview:
+        snippet = overview if len(overview) <= 160 else overview[:160].rsplit(" ", 1)[0] + "…"
+        st.caption(snippet)
+
     if show_similarity and "similarity_score" in content:
         score = content["similarity_score"]
         st.caption(f"🎯 Benzerlik: %{score * 100:.0f}")
 
     content_id = content.get("id")
+
+    # Fragman: TMDB isteği gerektirdiği için, tüm kartlar için otomatik
+    # değil, sadece kullanıcı gerçekten istediğinde (butona basınca) çekilir
+    # — yoksa 20 kartlık bir listede 20 gereksiz istek atılırdı.
+    trailer_flag_key = f"trailer_wanted_{key_prefix}_{idx}_{content_id}"
+    with st.expander("🎬 Fragman"):
+        if st.session_state.get(trailer_flag_key):
+            try:
+                trailer_key = tmdb.get_trailer_key(content_id, content.get("content_type", "movie"))
+            except Exception:
+                trailer_key = None
+            if trailer_key:
+                st.video(f"https://www.youtube.com/watch?v={trailer_key}")
+                st.caption(f"Açılmazsa: [YouTube'da aç](https://www.youtube.com/watch?v={trailer_key})")
+            else:
+                st.caption("Bu içerik için fragman bulunamadı.")
+        else:
+            if st.button("Fragmanı Yükle", key=f"load_trailer_{key_prefix}_{idx}_{content_id}", width="stretch"):
+                st.session_state[trailer_flag_key] = True
+                st.rerun()
+
     is_fav = fav_manager.is_favorite(content_id)
 
     btn_label = "❤️ Favorilerde" if is_fav else "🤍 Favorilere Ekle"
@@ -548,7 +592,7 @@ def _render_content_card_body(
     if st.button(btn_label, key=btn_key, width="stretch"):
         is_now_fav, message = fav_manager.toggle(content)
         st.toast(f"{'❤️' if is_now_fav else '💔'} {message}: {title}")
-        st.rerun()
+        _rerun_scoped()
 
     if feedback_manager.is_watched(content_id):
         st.success("Beğendin", icon="✅")
@@ -560,14 +604,14 @@ def _render_content_card_body(
             if st.button("✅ Beğendim", key=f"watched_{key_prefix}_{idx}_{content_id}", width="stretch"):
                 feedback_manager.mark_watched(content)
                 st.toast(f"✅ '{title}' beğendiğin olarak kaydedildi.")
-                st.rerun()
+                _rerun_scoped()
         with fb_col2:
             if st.button("🚫 Beğenmedim", key=f"disliked_{key_prefix}_{idx}_{content_id}", width="stretch"):
                 feedback_manager.mark_disliked(content)
                 if is_fav:
                     fav_manager.remove(content_id)
                 st.toast(f"🚫 '{title}' bir daha önerilmeyecek.")
-                st.rerun()
+                _rerun_scoped()
 
 
 
@@ -575,6 +619,7 @@ def display_content_card(
     content: dict,
     fav_manager: FavoritesManager,
     feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
     show_similarity: bool = False,
     col=None,
     idx: int = 0,
@@ -594,15 +639,16 @@ def display_content_card(
     """
     if col is not None:
         with col:
-            _render_content_card_body(content, fav_manager, feedback_manager, show_similarity, idx=idx, key_prefix=key_prefix)
+            _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix)
     else:
-        _render_content_card_body(content, fav_manager, feedback_manager, show_similarity, idx=idx, key_prefix=key_prefix)
+        _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix)
 
 
 def display_content_grid(
     items: list[dict],
     fav_manager: FavoritesManager,
     feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
     show_similarity: bool = False,
     key_prefix: str = "grid",
 ) -> None:
@@ -617,7 +663,7 @@ def display_content_grid(
 
     for idx, item in enumerate(items):
         with cols[idx % 3]:
-            _render_content_card_body(item, fav_manager, feedback_manager, show_similarity, idx=idx, key_prefix=key_prefix)
+            _render_content_card_body(item, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix)
             st.divider()
 
 
@@ -659,7 +705,7 @@ def display_favorites_page(tmdb: TMDBClient, fav_manager: FavoritesManager, feed
         results = st.session_state["fav_search_results"]
         if results:
             st.caption(f"'{st.session_state['fav_search_query_done']}' için {len(results)} sonuç bulundu.")
-            display_content_grid(results[:12], fav_manager, feedback_manager, show_similarity=False, key_prefix="favsearch")
+            display_content_grid(results[:12], fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="favsearch")
         else:
             st.warning(f"'{st.session_state['fav_search_query_done']}' için sonuç bulunamadı.")
 
@@ -1322,7 +1368,7 @@ def _render_full_results_section(
         else:
             sorted_pool = display_pool
 
-        display_content_grid(sorted_pool, fav_manager, feedback_manager, show_similarity=False, key_prefix="home")
+        display_content_grid(sorted_pool, fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="home")
 
         max_pages = 10  # TMDB'yi gereksiz zorlamamak için makul bir tavan
         can_load_more = len(display_pool) < total_results and st.session_state["list_pool_page"] < max_pages
@@ -1497,7 +1543,7 @@ def main():
             if st.session_state.ai_recommendations_key != cache_key:
                 st.info("Favorilerin veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
             elif st.session_state.ai_recommendations is not None:
-                display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, show_similarity=True, key_prefix="ai")
+                display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, tmdb, show_similarity=True, key_prefix="ai")
 
     with tab_favorites:
         display_favorites_page(tmdb, fav_manager, feedback_manager)

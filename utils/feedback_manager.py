@@ -5,10 +5,13 @@ Kullanıcının "beğendim" veya "beğenmedim" olarak işaretlediği içerikleri
 yönetir. Sadece "beğenmedim" olanlar çarkta/kart destesinde/listede/AI
 önerilerinde gizlenir.
 
-Kalıcı depolama olarak Supabase (Postgres) kullanır — Streamlit Community
-Cloud'un ücretsiz katmanında uygulama uykuya dalıp yeniden başlasa bile
-veriler kaybolmaz. Supabase bilgileri tanımlı değilse otomatik olarak eski
-oturum-bazlı JSON dosya sistemine düşer.
+ÖNEMLİ - PERFORMANS: Veriler `st.session_state`'te tutulur ve SADECE bu
+tarayıcı oturumunda İLK kez ihtiyaç duyulduğunda Supabase'den okunur.
+Sonraki tüm okumalar bellekten, ağa hiç gitmeden cevap verir. Sadece
+gerçek bir değişiklik (işaretleme/geri alma) olduğunda Supabase'e yazılır.
+
+Kalıcı depolama olarak Supabase (Postgres) kullanır; bilgiler tanımlı
+değilse otomatik olarak eski oturum-bazlı JSON dosya sistemine düşer.
 """
 
 import json
@@ -20,10 +23,17 @@ import streamlit as st
 _DATA_DIR = "data"
 
 
+@st.cache_resource(show_spinner=False)
+def _create_cached_supabase_client(url: str, key: str):
+    """Gerçek Supabase bağlantısını kurar; `@st.cache_resource` ile sadece bir kez çalışır."""
+    from supabase import create_client
+    return create_client(url, key)
+
+
 def _get_supabase_client():
-    """Supabase istemcisini oluşturur; bilgiler yoksa None döner."""
+    """Supabase istemcisini oluşturur (önbellekli); bilgiler yoksa None döner."""
     try:
-        from supabase import create_client
+        import supabase  # noqa: F401
     except ImportError:
         return None
 
@@ -41,16 +51,17 @@ def _get_supabase_client():
         return None
 
     try:
-        return create_client(url, key)
+        return _create_cached_supabase_client(url, key)
     except Exception as e:
         print(f"[Feedback] Supabase bağlantı hatası: {e}")
         return None
 
 
 class FeedbackManager:
-    """Kullanıcının beğendim/beğenmedim geri bildirimlerini yöneten sınıf."""
+    """Kullanıcının beğendim/beğenmedim geri bildirimlerini yöneten sınıf (oturum içi önbellekli)."""
 
     SESSION_KEY = "feedback"  # {"watched": [...], "disliked": [...]}
+    LOADED_FLAG_KEY = "feedback_loaded_from_backend"
 
     def __init__(self, session_id: Optional[str] = None):
         self._session_id = session_id or "local"
@@ -62,29 +73,54 @@ class FeedbackManager:
                 self.FEEDBACK_FILE = os.path.join(_DATA_DIR, f"feedback_{session_id}.json")
             else:
                 self.FEEDBACK_FILE = "user_feedback.json"
-            self._init_session_state()
-            self._load_from_file()
         else:
             self.FEEDBACK_FILE = None
+
+        if self.SESSION_KEY not in st.session_state:
+            st.session_state[self.SESSION_KEY] = {"watched": [], "disliked": []}
+        if self.LOADED_FLAG_KEY not in st.session_state:
+            st.session_state[self.LOADED_FLAG_KEY] = False
+
+    # -------------------------------------------------------------------
+    # İlk yükleme (bu tarayıcı oturumunda sadece bir kez çalışır)
+    # -------------------------------------------------------------------
+
+    def _ensure_loaded(self) -> None:
+        if st.session_state[self.LOADED_FLAG_KEY]:
+            return
+
+        if self._client is not None:
+            try:
+                response = (
+                    self._client.table("feedback")
+                    .select("content_id, status, content")
+                    .eq("session_id", self._session_id)
+                    .execute()
+                )
+                st.session_state[self.SESSION_KEY] = {
+                    "watched": [row["content"] for row in response.data if row["status"] == "watched"],
+                    "disliked": [row["content"] for row in response.data if row["status"] == "disliked"],
+                }
+            except Exception as e:
+                print(f"[Feedback] Supabase okuma hatası: {e}")
+        else:
+            self._load_from_file()
+
+        st.session_state[self.LOADED_FLAG_KEY] = True
 
     # -------------------------------------------------------------------
     # Dosya tabanlı yedek sistem (Supabase yapılandırılmamışsa kullanılır)
     # -------------------------------------------------------------------
-
-    def _init_session_state(self) -> None:
-        if self.SESSION_KEY not in st.session_state:
-            st.session_state[self.SESSION_KEY] = {"watched": [], "disliked": []}
 
     def _load_from_file(self) -> None:
         if os.path.exists(self.FEEDBACK_FILE):
             try:
                 with open(self.FEEDBACK_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    if not st.session_state[self.SESSION_KEY]["watched"] and not st.session_state[self.SESSION_KEY]["disliked"]:
-                        st.session_state[self.SESSION_KEY] = {
-                            "watched": data.get("watched", []),
-                            "disliked": data.get("disliked", []),
-                        }
+                    st.session_state[self.SESSION_KEY] = {
+                        "watched": data.get("watched", []),
+                        "disliked": data.get("disliked", []),
+                    }
             except (json.JSONDecodeError, IOError) as e:
                 print(f"[Feedback] Dosya okuma hatası: {e}")
 
@@ -103,12 +139,13 @@ class FeedbackManager:
             "marked_at": datetime.now().isoformat(),
         }
 
-    def _remove_from_file_bucket(self, bucket: str, content_id: int) -> None:
+    def _remove_from_bucket(self, bucket: str, content_id: int) -> None:
         items = st.session_state[self.SESSION_KEY][bucket]
         st.session_state[self.SESSION_KEY][bucket] = [i for i in items if i.get("id") != content_id]
 
     # -------------------------------------------------------------------
-    # Genel API (her iki depolama biçiminde de aynı şekilde çalışır)
+    # Genel API — okumalar bellekten anında cevap verir, yazmalar hem
+    # yerel listeyi hem (varsa) Supabase'i günceller.
     # -------------------------------------------------------------------
 
     def mark_watched(self, content: dict) -> bool:
@@ -116,6 +153,11 @@ class FeedbackManager:
         content_id = content.get("id")
         if content_id is None:
             return False
+        self._ensure_loaded()
+
+        self._remove_from_bucket("disliked", content_id)
+        self._remove_from_bucket("watched", content_id)
+        st.session_state[self.SESSION_KEY]["watched"].insert(0, self._make_entry(content))
 
         if self._client is not None:
             try:
@@ -125,15 +167,10 @@ class FeedbackManager:
                     "status": "watched",
                     "content": self._make_entry(content),
                 }).execute()
-                return True
             except Exception as e:
                 print(f"[Feedback] Supabase yazma hatası: {e}")
-                return False
-
-        self._remove_from_file_bucket("disliked", content_id)
-        self._remove_from_file_bucket("watched", content_id)
-        st.session_state[self.SESSION_KEY]["watched"].append(self._make_entry(content))
-        self._save_to_file()
+        else:
+            self._save_to_file()
         return True
 
     def mark_disliked(self, content: dict) -> bool:
@@ -141,6 +178,11 @@ class FeedbackManager:
         content_id = content.get("id")
         if content_id is None:
             return False
+        self._ensure_loaded()
+
+        self._remove_from_bucket("watched", content_id)
+        self._remove_from_bucket("disliked", content_id)
+        st.session_state[self.SESSION_KEY]["disliked"].insert(0, self._make_entry(content))
 
         if self._client is not None:
             try:
@@ -150,77 +192,37 @@ class FeedbackManager:
                     "status": "disliked",
                     "content": self._make_entry(content),
                 }).execute()
-                return True
             except Exception as e:
                 print(f"[Feedback] Supabase yazma hatası: {e}")
-                return False
-
-        self._remove_from_file_bucket("watched", content_id)
-        self._remove_from_file_bucket("disliked", content_id)
-        st.session_state[self.SESSION_KEY]["disliked"].append(self._make_entry(content))
-        self._save_to_file()
+        else:
+            self._save_to_file()
         return True
 
     def unmark(self, content_id: int) -> None:
         """Bir içeriğin işaretini kaldır (geri al)."""
+        self._ensure_loaded()
+        self._remove_from_bucket("watched", content_id)
+        self._remove_from_bucket("disliked", content_id)
+
         if self._client is not None:
             try:
                 self._client.table("feedback").delete().eq("session_id", self._session_id).eq("content_id", content_id).execute()
             except Exception as e:
                 print(f"[Feedback] Supabase silme hatası: {e}")
-            return
-
-        self._remove_from_file_bucket("watched", content_id)
-        self._remove_from_file_bucket("disliked", content_id)
-        self._save_to_file()
-
-    def _get_status(self, content_id: int) -> Optional[str]:
-        if self._client is not None:
-            try:
-                response = (
-                    self._client.table("feedback")
-                    .select("status")
-                    .eq("session_id", self._session_id)
-                    .eq("content_id", content_id)
-                    .execute()
-                )
-                if response.data:
-                    return response.data[0]["status"]
-                return None
-            except Exception as e:
-                print(f"[Feedback] Supabase okuma hatası: {e}")
-                return None
-        if any(i.get("id") == content_id for i in st.session_state[self.SESSION_KEY]["watched"]):
-            return "watched"
-        if any(i.get("id") == content_id for i in st.session_state[self.SESSION_KEY]["disliked"]):
-            return "disliked"
-        return None
+        else:
+            self._save_to_file()
 
     def is_watched(self, content_id: int) -> bool:
-        return self._get_status(content_id) == "watched"
+        self._ensure_loaded()
+        return any(i.get("id") == content_id for i in st.session_state[self.SESSION_KEY]["watched"])
 
     def is_disliked(self, content_id: int) -> bool:
-        return self._get_status(content_id) == "disliked"
+        self._ensure_loaded()
+        return any(i.get("id") == content_id for i in st.session_state[self.SESSION_KEY]["disliked"])
 
     def get_excluded_ids(self) -> set:
-        """
-        Çark/kart/liste/AI önerilerinden hariç tutulması gereken ID'ler.
-        Sadece "beğenmedim" olanlar gizlenir — "beğendim" olumlu bir
-        işarettir, bir daha görünmeyi engellemez.
-        """
-        if self._client is not None:
-            try:
-                response = (
-                    self._client.table("feedback")
-                    .select("content_id")
-                    .eq("session_id", self._session_id)
-                    .eq("status", "disliked")
-                    .execute()
-                )
-                return {row["content_id"] for row in response.data}
-            except Exception as e:
-                print(f"[Feedback] Supabase okuma hatası: {e}")
-                return set()
+        """Sadece 'beğenmedim' olanlar çark/kart/liste/AI önerilerinden gizlenir."""
+        self._ensure_loaded()
         return {i.get("id") for i in st.session_state[self.SESSION_KEY]["disliked"]}
 
     def get_watched_count(self) -> int:
@@ -230,37 +232,11 @@ class FeedbackManager:
         return len(self.get_disliked_list())
 
     def get_watched_list(self) -> list[dict]:
-        """Beğenilen içeriklerin tam listesini döndürür (yönetim sayfası için)."""
-        if self._client is not None:
-            try:
-                response = (
-                    self._client.table("feedback")
-                    .select("content")
-                    .eq("session_id", self._session_id)
-                    .eq("status", "watched")
-                    .execute()
-                )
-                return [row["content"] for row in response.data]
-            except Exception as e:
-                print(f"[Feedback] Supabase okuma hatası: {e}")
-                return []
+        self._ensure_loaded()
         return list(st.session_state[self.SESSION_KEY]["watched"])
 
     def get_disliked_list(self) -> list[dict]:
-        """Beğenilmeyen içeriklerin tam listesini döndürür (yönetim sayfası için)."""
-        if self._client is not None:
-            try:
-                response = (
-                    self._client.table("feedback")
-                    .select("content")
-                    .eq("session_id", self._session_id)
-                    .eq("status", "disliked")
-                    .execute()
-                )
-                return [row["content"] for row in response.data]
-            except Exception as e:
-                print(f"[Feedback] Supabase okuma hatası: {e}")
-                return []
+        self._ensure_loaded()
         return list(st.session_state[self.SESSION_KEY]["disliked"])
 
     def filter_pool(self, items: list[dict]) -> list[dict]:
