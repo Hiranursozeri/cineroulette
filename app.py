@@ -596,7 +596,7 @@ def _render_content_card_body(
     if feedback_manager.is_watched(content_id):
         st.success("Beğendin", icon="✅")
     elif feedback_manager.is_disliked(content_id):
-        st.error("Beğenmedin", icon="🚫")
+        st.warning("Beğenmedin", icon="🚫")
     else:
         fb_col1, fb_col2 = st.columns(2)
         with fb_col1:
@@ -942,7 +942,7 @@ def _show_winner_dialog(
     if feedback_manager.is_watched(winner_id):
         st.success("Beğendin", icon="✅")
     elif feedback_manager.is_disliked(winner_id):
-        st.error("Beğenmedin", icon="🚫")
+        st.warning("Beğenmedin", icon="🚫")
     else:
         fb_col1, fb_col2 = st.columns(2)
         with fb_col1:
