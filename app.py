@@ -983,14 +983,28 @@ def _render_card_deck(items: list[dict], fav_manager: FavoritesManager, feedback
             border-color: #f5c518 !important;
             box-shadow: 0 8px 18px rgba(0,0,0,0.6);
         }
-        .st-key-card_deck_fan > div:nth-child(1) button { transform: rotate(-18deg) translateY(14px); }
-        .st-key-card_deck_fan > div:nth-child(2) button { transform: rotate(-13deg) translateY(7px); }
-        .st-key-card_deck_fan > div:nth-child(3) button { transform: rotate(-8deg) translateY(3px); }
-        .st-key-card_deck_fan > div:nth-child(4) button { transform: rotate(-3deg); }
-        .st-key-card_deck_fan > div:nth-child(5) button { transform: rotate(3deg); }
-        .st-key-card_deck_fan > div:nth-child(6) button { transform: rotate(8deg) translateY(3px); }
-        .st-key-card_deck_fan > div:nth-child(7) button { transform: rotate(13deg) translateY(7px); }
-        .st-key-card_deck_fan > div:nth-child(8) button { transform: rotate(18deg) translateY(14px); }
+
+        /* KARIŞTIRMA ANİMASYONU: Deste her render edildiğinde (ilk açılışta
+           ve "Yeni Deste Karıştır" ile) kartlar ortadan, küçük ve dönüşsüz
+           bir halde belirip, birer birer (gecikmeli) kendi yelpaze
+           konumlarına "dağıtılıyor" gibi yerleşiyor. */
+        @keyframes dealCard1 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-18deg) translateY(14px); } }
+        @keyframes dealCard2 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-13deg) translateY(7px); } }
+        @keyframes dealCard3 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-8deg) translateY(3px); } }
+        @keyframes dealCard4 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-3deg); } }
+        @keyframes dealCard5 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(3deg); } }
+        @keyframes dealCard6 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(8deg) translateY(3px); } }
+        @keyframes dealCard7 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(13deg) translateY(7px); } }
+        @keyframes dealCard8 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(18deg) translateY(14px); } }
+        .st-key-card_deck_fan > div:nth-child(1) button { animation: dealCard1 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.00s; }
+        .st-key-card_deck_fan > div:nth-child(2) button { animation: dealCard2 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.05s; }
+        .st-key-card_deck_fan > div:nth-child(3) button { animation: dealCard3 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.10s; }
+        .st-key-card_deck_fan > div:nth-child(4) button { animation: dealCard4 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.15s; }
+        .st-key-card_deck_fan > div:nth-child(5) button { animation: dealCard5 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.20s; }
+        .st-key-card_deck_fan > div:nth-child(6) button { animation: dealCard6 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.25s; }
+        .st-key-card_deck_fan > div:nth-child(7) button { animation: dealCard7 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.30s; }
+        .st-key-card_deck_fan > div:nth-child(8) button { animation: dealCard8 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.35s; }
+
         .st-key-card_deck_fan > div:hover button {
             transform: translateY(-18px) scale(1.08) !important;
             z-index: 20;
@@ -1125,6 +1139,10 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
         st.session_state.wheel_winner = None
         st.session_state.spin_seed = st.session_state.get("spin_seed", 0)
 
+    if filter_mode in ("mood", "genre") and not selected_moods and not selected_genres:
+        st.info("👆 Devam etmeden önce soldan bir **ruh hali** ya da **tür** seç.")
+        return
+
     if filter_mode == "favorites":
         pool = fav_manager.get_all()
         total_results = len(pool)
@@ -1163,8 +1181,6 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
         st.caption(f"❤️ Favorilerinden seçim yapılıyor ({total_results} favori).")
     elif random_mode:
         st.caption(f"🎲 Rastgele mod: ruh hali/tür seçimlerin yok sayılıyor, kaliteli içerik havuzundan rastgele seçiliyor ({total_results} sonuç).")
-    elif not selected_moods and not selected_genres:
-        st.caption(f"ℹ️ Herhangi bir ruh hali/tür seçmedin — sadece popülerliğe/puana göre genel içerikler gösteriliyor (toplam {total_results:,} sonuç). Belirli bir kategoriye göre daraltmak için soldan ruh hali veya tür seç.".replace(",", "."))
     else:
         chosen = [MOOD_FILTERS[k].label for k in selected_moods] + [GENRE_FILTERS[k].label for k in selected_genres]
         st.caption(f"🎯 Uygulanan filtreler: {', '.join(chosen)} — toplam {total_results:,} sonuç".replace(",", "."))

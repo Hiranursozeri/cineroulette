@@ -6,6 +6,7 @@ markası içeren indirilebilir bir görsele (PNG) dönüştürür.
 """
 
 import io
+import os
 from typing import Optional
 
 import requests
@@ -17,15 +18,25 @@ ACCENT_COLOR = (229, 9, 20)       # #e50914 (uygulamanın kırmızı vurgusu)
 BG_COLOR = (20, 20, 20)           # #141414
 RATING_COLOR = (245, 197, 24)     # #f5c518
 
-# Windows ve Linux'ta yaygın bulunan fontları sırayla dene; hiçbiri yoksa
-# Pillow'un yerleşik (küçük ama garanti çalışan) fontuna düş.
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "fonts")
+
+# ÖNEMLİ: Sunucu ortamı (ör. Streamlit Community Cloud, Linux) hangi
+# fontların kurulu olduğunu garanti etmez. Windows'a özel yollar (arialbd.ttf
+# vb.) sadece yerel geliştirmede işe yarar; canlıda hiçbiri bulunamazsa
+# Pillow'un çok temel yedek fontuna düşülür — bu da ğ, ş, ı, ö, ü, ç gibi
+# Türkçe karakterleri düzgün çizemez. Bunu kesin olarak çözmek için, projeye
+# gömülü bir font (DejaVu Sans — Türkçe karakterleri tam destekler) İLK
+# sırada deneniyor; sistem fontları sadece onun da bulunamadığı (ör. dosya
+# eksikse) durumlarda yedek olarak kalıyor.
 _FONT_CANDIDATES_BOLD = [
+    os.path.join(_ASSETS_DIR, "DejaVuSans-Bold.ttf"),
     "C:/Windows/Fonts/arialbd.ttf",
     "C:/Windows/Fonts/segoeuib.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
 ]
 _FONT_CANDIDATES_REGULAR = [
+    os.path.join(_ASSETS_DIR, "DejaVuSans.ttf"),
     "C:/Windows/Fonts/arial.ttf",
     "C:/Windows/Fonts/segoeui.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",

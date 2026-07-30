@@ -117,6 +117,15 @@ def _mocked_app(discover_return=None, get_random_return=None, watch_providers_re
 
     at = AppTest.from_file("app.py")
     at.run(timeout=30)
+
+    # Uygulama artık en az bir ruh hali/tür seçilmeden çark/kart bölümünü
+    # göstermiyor. Testlerin çoğu hangi ruh hali olduğuyla ilgilenmediği
+    # için, burada varsayılan olarak bir tane seçiyoruz — spesifik bir mod/
+    # tür/favoriler/rastgele davranışı test eden fonksiyonlar zaten kendi
+    # seçimlerini ayrıca yapıyor (bu varsayılanın üzerine yazılır).
+    mood_widget = next((m for m in at.multiselect if m.key == "mood_multiselect"), None)
+    if mood_widget is not None:
+        mood_widget.select("aglamalik").run(timeout=30)
     return at, patches
 
 
@@ -918,6 +927,38 @@ def test_ikincil_tur_olarak_eslesen_icerikler_eleniyor():
 
         assert len(result) == 1
         assert result[0]["id"] == 3, "Sadece Komedi'nin birincil tür olduğu içerik kalmalıydı"
+
+
+# =============================================================================
+# 16) FİLTRE SEÇİLMEDEN ÇARK/KART GİZLENMESİ TESTLERİ
+# =============================================================================
+
+def test_hicbir_sey_secilmeden_cark_gizli():
+    """Ruh hali/tür modunda hiçbir seçim yapılmadan çark/kart bölümü hiç görünmemeli."""
+    discover_return = make_fake_items()
+    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
+         patch("utils.tmdb_client.TMDBClient.discover_movies", return_value=discover_return), \
+         patch("utils.tmdb_client.TMDBClient.discover_tv_shows", return_value=discover_return):
+        at = AppTest.from_file("app.py")
+        at.run(timeout=30)  # _mocked_app'in aksine burada BİLEREK hiçbir seçim yapmıyoruz
+
+        assert len(at.exception) == 0
+        spin_btn = next((b for b in at.button if "Çarkı Çevir" in (b.label or "")), None)
+        assert spin_btn is None, "Hiçbir şey seçilmeden çark görünmemeliydi"
+
+        info_texts = [i.value for i in at.info]
+        assert any("ruh hali" in (t or "") and "tür" in (t or "") for t in info_texts)
+
+
+def test_ruh_hali_secince_cark_gorunuyor():
+    """Bir ruh hali seçilince çark/kart bölümü görünmeli."""
+    at, patches = _mocked_app()  # _mocked_app zaten varsayılan olarak bir ruh hali seçiyor
+    try:
+        assert len(at.exception) == 0
+        spin_btn = next((b for b in at.button if "Çarkı Çevir" in (b.label or "")), None)
+        assert spin_btn is not None, "Ruh hali seçilince çark görünmeliydi"
+    finally:
+        _stop_patches(patches)
 
 
 if __name__ == "__main__":
