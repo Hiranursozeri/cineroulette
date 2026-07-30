@@ -180,6 +180,7 @@ class FeedbackManager:
     def mark_disliked(self, content: dict) -> bool:
         """İçeriği 'beğenmedim' olarak işaretle (varsa 'beğendim'den çıkarır)."""
         _t_start = time.time()
+        st.write(f"🐛 DEBUG: mark_disliked BAŞLADI - {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
         content_id = content.get("id")
         if content_id is None:
             return False
