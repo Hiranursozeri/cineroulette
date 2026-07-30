@@ -507,20 +507,18 @@ def fetch_ai_recommendations(
 # GÖRÜNTÜLEME
 # =============================================================================
 
-def _rerun_scoped() -> None:
+def _rerun_scoped(is_fragment: bool = False) -> None:
     """
-    Mümkünse sadece bulunulan fragment'ı, mümkün değilse tüm sayfayı
-    yeniden çalıştırır. Bu fonksiyon bir @st.fragment içinden çağrılırsa
-    (ör. "Tüm sonuçları listele" bölümü), sadece o bölüm yenilenir —
-    sayfanın başına atlama ve gereksiz yeniden hesaplama olmaz. Fragment
-    dışından (ör. AI önerileri, favori arama sonuçları) çağrılırsa,
-    scope="fragment" geçersiz olduğu için güvenli şekilde normal
-    (tüm sayfa) yeniden çalıştırmaya düşer.
+    NOT (önemli): `st.rerun(scope="fragment")` denemesi, elimizdeki
+    Streamlit sürümünde (1.60.0) bu kullanım şeklinde güvenilir çalışmadı
+    — "scope=fragment can only be specified... during fragment reruns"
+    hatası veriyordu, önceki sürümde bu hata bir try/except ile
+    SESSİZCE yutuluyor ve fark edilmeden her seferinde tam sayfa
+    yenilemeye düşülüyordu. Bunu artık gizlemiyoruz: `is_fragment`
+    parametresi şu an için sadece belgeleme amaçlı tutuluyor, gerçek
+    davranış her zaman normal (tüm sayfa) yeniden çalıştırmadır.
     """
-    try:
-        st.rerun(scope="fragment")
-    except Exception:
-        st.rerun()
+    st.rerun()
 
 
 def _render_content_card_body(
@@ -531,6 +529,7 @@ def _render_content_card_body(
     show_similarity: bool,
     idx: int = 0,
     key_prefix: str = "grid",
+    is_fragment: bool = False,
 ) -> None:
     """Bir içerik kartının gövdesini render eder (context manager'dan bağımsız)."""
     poster_url = content.get("poster_url") or TMDBClient.PLACEHOLDER_POSTER
@@ -592,7 +591,7 @@ def _render_content_card_body(
     if st.button(btn_label, key=btn_key, width="stretch"):
         is_now_fav, message = fav_manager.toggle(content)
         st.toast(f"{'❤️' if is_now_fav else '💔'} {message}: {title}")
-        _rerun_scoped()
+        _rerun_scoped(is_fragment=is_fragment)
 
     if feedback_manager.is_watched(content_id):
         st.success("Beğendin", icon="✅")
@@ -604,14 +603,14 @@ def _render_content_card_body(
             if st.button("✅ Beğendim", key=f"watched_{key_prefix}_{idx}_{content_id}", width="stretch"):
                 feedback_manager.mark_watched(content)
                 st.toast(f"✅ '{title}' beğendiğin olarak kaydedildi.")
-                _rerun_scoped()
+                _rerun_scoped(is_fragment=is_fragment)
         with fb_col2:
             if st.button("🚫 Beğenmedim", key=f"disliked_{key_prefix}_{idx}_{content_id}", width="stretch"):
                 feedback_manager.mark_disliked(content)
                 if is_fav:
                     fav_manager.remove(content_id)
                 st.toast(f"🚫 '{title}' bir daha önerilmeyecek.")
-                _rerun_scoped()
+                _rerun_scoped(is_fragment=is_fragment)
 
 
 
@@ -624,6 +623,7 @@ def display_content_card(
     col=None,
     idx: int = 0,
     key_prefix: str = "grid",
+    is_fragment: bool = False,
 ) -> None:
     """
     Tek bir içerik kartı göster.
@@ -639,9 +639,9 @@ def display_content_card(
     """
     if col is not None:
         with col:
-            _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix)
+            _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix, is_fragment=is_fragment)
     else:
-        _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix)
+        _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix, is_fragment=is_fragment)
 
 
 def display_content_grid(
@@ -651,8 +651,16 @@ def display_content_grid(
     tmdb: TMDBClient,
     show_similarity: bool = False,
     key_prefix: str = "grid",
+    is_fragment: bool = False,
 ) -> None:
-    """İçerik grid'i göster."""
+    """
+    İçerik grid'i göster.
+
+    `is_fragment`: Bu fonksiyonun bir @st.fragment içinden çağrılıp
+    çağrılmadığını KESİN olarak belirtir (çağıran taraf bilir). Buna göre,
+    kartlardaki favori/beğendim/beğenmedim butonları sadece bu bölümü mü
+    (fragment), yoksa tüm sayfayı mı yenileyeceğine karar verir.
+    """
     if not items:
         st.warning("🔍 Bu kriterlere uygun içerik bulunamadı.")
         return
@@ -663,7 +671,7 @@ def display_content_grid(
 
     for idx, item in enumerate(items):
         with cols[idx % 3]:
-            _render_content_card_body(item, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix)
+            _render_content_card_body(item, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix, is_fragment=is_fragment)
             st.divider()
 
 
@@ -705,7 +713,7 @@ def display_favorites_page(tmdb: TMDBClient, fav_manager: FavoritesManager, feed
         results = st.session_state["fav_search_results"]
         if results:
             st.caption(f"'{st.session_state['fav_search_query_done']}' için {len(results)} sonuç bulundu.")
-            display_content_grid(results[:12], fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="favsearch")
+            display_content_grid(results[:12], fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="favsearch", is_fragment=False)
         else:
             st.warning(f"'{st.session_state['fav_search_query_done']}' için sonuç bulunamadı.")
 
@@ -1368,7 +1376,7 @@ def _render_full_results_section(
         else:
             sorted_pool = display_pool
 
-        display_content_grid(sorted_pool, fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="home")
+        display_content_grid(sorted_pool, fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="home", is_fragment=True)
 
         max_pages = 10  # TMDB'yi gereksiz zorlamamak için makul bir tavan
         can_load_more = len(display_pool) < total_results and st.session_state["list_pool_page"] < max_pages
@@ -1543,7 +1551,7 @@ def main():
             if st.session_state.ai_recommendations_key != cache_key:
                 st.info("Favorilerin veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
             elif st.session_state.ai_recommendations is not None:
-                display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, tmdb, show_similarity=True, key_prefix="ai")
+                display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, tmdb, show_similarity=True, key_prefix="ai", is_fragment=False)
 
     with tab_favorites:
         display_favorites_page(tmdb, fav_manager, feedback_manager)
