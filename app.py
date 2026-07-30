@@ -1140,7 +1140,7 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
         st.session_state.spin_seed = st.session_state.get("spin_seed", 0)
 
     if filter_mode in ("mood", "genre") and not selected_moods and not selected_genres:
-        st.info("👆 Devam etmeden önce soldan bir **ruh hali** ya da **tür** seç.")
+        st.info("👈 Devam etmeden önce soldan bir **ruh hali** ya da **tür** seç.")
         return
 
     if filter_mode == "favorites":
