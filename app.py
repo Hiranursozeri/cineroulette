@@ -928,7 +928,7 @@ def _show_winner_dialog(
         if not is_fav:
             fav_manager.add(winner)
             st.toast(f"❤️ {winner.get('title')} favorilere eklendi!")
-            st.rerun()
+            _rerun_scoped()
 
     winner_id = winner.get("id")
     if feedback_manager.is_watched(winner_id):
@@ -941,14 +941,14 @@ def _show_winner_dialog(
             if st.button("✅ Beğendim", key="dialog_watched", width="stretch"):
                 feedback_manager.mark_watched(winner)
                 st.toast(f"✅ '{winner.get('title')}' beğendiğin olarak kaydedildi.")
-                st.rerun()
+                _rerun_scoped()
         with fb_col2:
             if st.button("🚫 Beğenmedim", key="dialog_disliked", width="stretch"):
                 feedback_manager.mark_disliked(winner)
                 if is_fav:
                     fav_manager.remove(winner_id)
                 st.toast(f"🚫 '{winner.get('title')}' bir daha önerilmeyecek.")
-                st.rerun()
+                _rerun_scoped()
 
 
 def _render_card_deck(items: list[dict], fav_manager: FavoritesManager, feedback_manager: FeedbackManager, tmdb: TMDBClient) -> None:

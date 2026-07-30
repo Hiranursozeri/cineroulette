@@ -16,6 +16,7 @@ değilse otomatik olarak eski oturum-bazlı JSON dosya sistemine düşer.
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Optional
 import streamlit as st
@@ -87,16 +88,19 @@ class FeedbackManager:
 
     def _ensure_loaded(self) -> None:
         if st.session_state[self.LOADED_FLAG_KEY]:
+            print("[ZAMANLAMA] feedback _ensure_loaded: onbellekten (ag istegi YOK)")
             return
 
         if self._client is not None:
             try:
+                t0 = time.time()
                 response = (
                     self._client.table("feedback")
                     .select("content_id, status, content")
                     .eq("session_id", self._session_id)
                     .execute()
                 )
+                print(f"[ZAMANLAMA] feedback _ensure_loaded Supabase okuma: {time.time() - t0:.2f}s")
                 st.session_state[self.SESSION_KEY] = {
                     "watched": [row["content"] for row in response.data if row["status"] == "watched"],
                     "disliked": [row["content"] for row in response.data if row["status"] == "disliked"],
@@ -175,6 +179,7 @@ class FeedbackManager:
 
     def mark_disliked(self, content: dict) -> bool:
         """İçeriği 'beğenmedim' olarak işaretle (varsa 'beğendim'den çıkarır)."""
+        _t_start = time.time()
         content_id = content.get("id")
         if content_id is None:
             return False
@@ -186,16 +191,19 @@ class FeedbackManager:
 
         if self._client is not None:
             try:
+                t0 = time.time()
                 self._client.table("feedback").upsert({
                     "session_id": self._session_id,
                     "content_id": content_id,
                     "status": "disliked",
                     "content": self._make_entry(content),
                 }).execute()
+                print(f"[ZAMANLAMA] mark_disliked Supabase yazma: {time.time() - t0:.2f}s")
             except Exception as e:
                 print(f"[Feedback] Supabase yazma hatası: {e}")
         else:
             self._save_to_file()
+        print(f"[ZAMANLAMA] mark_disliked TOPLAM sure: {time.time() - _t_start:.2f}s")
         return True
 
     def unmark(self, content_id: int) -> None:
