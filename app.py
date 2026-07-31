@@ -510,11 +510,12 @@ def _render_ai_recommendations_section(
     feedback_manager: FeedbackManager,
     favorites: list[dict],
     ai_content_type: str,
+    year_range: tuple[int, int],
 ) -> None:
     """
     "Önerileri Hesapla" butonu ve sonuç grid'i.
 
-    ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi): Bu bölüm bir
+    ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi #1): Bu bölüm bir
     fragment olarak İŞARETLENMEDEN önce, "Önerileri Hesapla" butonuna
     basmak TÜM SAYFAYI yeniden çalıştırıyordu — ve Streamlit'in `st.tabs`
     bileşeni tam sayfa yeniden çalıştırmalarında aktif sekmeyi hatırlamadığı
@@ -522,7 +523,16 @@ def _render_ai_recommendations_section(
     "Anasayfa" sekmesine sıçrıyordu. `@st.fragment` ile işaretlemek, bu
     butona tıklamanın SADECE bu bölümü yenilemesini sağlıyor — sekme
     değişmiyor.
+
+    ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi #2): Sidebar'daki
+    "Yapım yılı aralığı" filtresi, tüm sekmelerde görünür olmasına rağmen
+    (Streamlit'te sidebar sayfa geneli bir öğedir, tek bir sekmeye ait
+    değildir) AI önerilerine hiç uygulanmıyordu — kullanıcı haklı olarak
+    "1990-2010 seçtim ama güncel filmler geldi" diye şaşırıyordu. Artık
+    aynı yıl aralığı buraya da geçiriliyor.
     """
+    st.caption(f"📅 Uygulanan yıl filtresi: {year_range[0]}–{year_range[1]} (sidebar'daki 'Yapım yılı aralığı' ile aynı)")
+
     # NOT: Öneriler eskiden her sayfa etkileşiminde (ör. Anasayfa'da
     # filtre değiştirmede) arka planda otomatik hesaplanıyordu — bu,
     # görünmeden TMDB'ye 4-6 istek atıp tüm uygulamayı yavaşlatıyordu.
@@ -530,7 +540,7 @@ def _render_ai_recommendations_section(
     st.session_state.setdefault("ai_recommendations", None)
     st.session_state.setdefault("ai_recommendations_key", None)
 
-    cache_key = (ai_content_type, tuple(sorted(f.get("id") for f in favorites)))
+    cache_key = (ai_content_type, year_range, tuple(sorted(f.get("id") for f in favorites)))
     compute_clicked = st.button("🔄 Önerileri Hesapla", type="primary", key="ai_compute_btn")
 
     if compute_clicked:
@@ -540,12 +550,13 @@ def _render_ai_recommendations_section(
                 ml_engine=ml_engine,
                 favorites=favorites,
                 content_type=ai_content_type,
+                year_range=year_range,
             )
             st.session_state.ai_recommendations = feedback_manager.filter_pool(recs)
             st.session_state.ai_recommendations_key = cache_key
 
     if st.session_state.ai_recommendations_key != cache_key:
-        st.info("Favorilerin veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
+        st.info("Favorilerin, yıl filtren veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
     elif st.session_state.ai_recommendations is not None:
         display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, tmdb, show_similarity=True, key_prefix="ai", is_fragment=True)
 
@@ -555,6 +566,7 @@ def fetch_ai_recommendations(
     ml_engine: RecommendationEngine,
     favorites: list[dict],
     content_type: str,
+    year_range: tuple[int, int] = (1950, 2100),
 ) -> list[dict]:
     """AI tabanlı öneriler getir."""
     if not favorites:
@@ -572,6 +584,7 @@ def fetch_ai_recommendations(
         # aday grubu ekliyoruz. top_n=4 (eskiden 2) — favori zevklerin daha
         # çeşitliyse (ör. 3-4 farklı tür), bu çeşitliliği daha iyi yansıtır.
         top_genres = _get_top_genres_from_favorites(favorites, content_type, top_n=4)
+        year_from, year_to = year_range
 
         if content_type == "movie":
             if top_genres:
@@ -579,12 +592,16 @@ def fetch_ai_recommendations(
                     genre_ids=top_genres,
                     min_vote_average=6.0,
                     min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
                     page=1,
                 ))
                 candidate_pool.extend(tmdb.discover_movies(
                     genre_ids=top_genres,
                     min_vote_average=6.0,
                     min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
                     page=2,
                 ))
             candidate_pool.extend(tmdb.get_popular_movies(page=1))
@@ -592,6 +609,8 @@ def fetch_ai_recommendations(
             candidate_pool.extend(tmdb.discover_movies(
                 min_vote_average=7.5,
                 min_vote_count=1000,
+                year_from=year_from,
+                year_to=year_to,
                 page=1,
             ))
         else:
@@ -600,12 +619,16 @@ def fetch_ai_recommendations(
                     genre_ids=top_genres,
                     min_vote_average=6.0,
                     min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
                     page=1,
                 ))
                 candidate_pool.extend(tmdb.discover_tv_shows(
                     genre_ids=top_genres,
                     min_vote_average=6.0,
                     min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
                     page=2,
                 ))
             candidate_pool.extend(tmdb.get_popular_tv_shows(page=1))
@@ -628,6 +651,20 @@ def fetch_ai_recommendations(
         # filtrelenmediği için (sadece popülerliğe göre sıralı), bunu
         # burada kendimiz garanti altına alıyoruz.
         unique_pool = [item for item in unique_pool if (item.get("vote_average") or 0) >= 5.0]
+
+        # Yıl filtresi de son bir kez istemci tarafında garanti altına
+        # alınıyor — "popüler" havuz TMDB'de yıl parametresi desteklemediği
+        # için (sadece popülerliğe göre sıralı), oradan gelen içerikler
+        # yıl aralığı dışında kalabiliyordu.
+        def _in_year_range(item: dict) -> bool:
+            date_str = item.get("release_date") or ""
+            try:
+                year = int(date_str[:4])
+            except (ValueError, TypeError):
+                return False
+            return year_from <= year <= year_to
+
+        unique_pool = [item for item in unique_pool if _in_year_range(item)]
 
         recommendations = ml_engine.get_recommendations(
             favorites=favorites,
@@ -1342,7 +1379,7 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
         else:
             rating_range = st.slider("Puan aralığı", 0.0, 10.0, (6.0, 10.0), 0.5)
             current_year = datetime.date.today().year
-            year_range = st.slider("Yapım yılı aralığı", 1950, current_year, (1990, current_year))
+            year_range = st.slider("Yapım yılı aralığı", 1950, current_year, (1990, current_year), key="year_range_slider")
             content_type = st.selectbox(
                 "İçerik türü",
                 options=["movie", "tv"],
@@ -1714,7 +1751,13 @@ def main():
                 "2. Bu sekmeye geri dön"
             )
         else:
-            _render_ai_recommendations_section(tmdb, ml_engine, fav_manager, feedback_manager, favorites, ai_content_type)
+            # Sidebar'daki "Yapım yılı aralığı" filtresi sayfa geneli bir
+            # öğe (sadece Anasayfa'ya özel değil), bu yüzden AI önerilerine
+            # de aynı aralığı uyguluyoruz. Favoriler/Rastgele modundaysa
+            # (bu slider hiç render edilmemiş olabilir) makul bir varsayılana
+            # (filtresiz: tüm yıllar) düşüyoruz.
+            ai_year_range = st.session_state.get("year_range_slider", (1950, datetime.date.today().year))
+            _render_ai_recommendations_section(tmdb, ml_engine, fav_manager, feedback_manager, favorites, ai_content_type, ai_year_range)
 
     with tab_favorites:
         display_favorites_page(tmdb, fav_manager, feedback_manager)

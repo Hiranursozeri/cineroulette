@@ -1,1326 +1,1770 @@
-"""
-CineRoulette - Otomatik Test Paketi
-====================================
-Gerçek bir TMDB API anahtarına veya internet bağlantısına ihtiyaç duymaz;
-tüm TMDB çağrıları sahte (mock) verilerle değiştirilir. Streamlit'in
-resmi `AppTest` çerçevesini kullanır — uygulamayı gerçek bir tarayıcı
-açmadan, kod seviyesinde çalıştırıp kontrol eder.
+import random
+import time
+import datetime
+import base64
+import json
+import uuid
+import streamlit as st
+from typing import Optional
 
-ÇALIŞTIRMAK İÇİN:
-    cd C:\\film_carki
-    .\\venv\\Scripts\\Activate.ps1
-    pip install pytest
-    pytest test_app.py -v
+from utils.tmdb_client import TMDBClient, ResultList
+from utils.favorites_manager import FavoritesManager
+from utils.feedback_manager import FeedbackManager
+from utils.share_card import generate_share_card
+from utils.movie_filters import (
+    MOOD_FILTERS, GENRE_FILTERS, RANDOM_FILTER,
+    AI_RECOMMENDATION_FILTER, FilterConfig,
+    get_tv_genre_ids,
+)
 
-Her test bağımsızdır (kendi temiz AppTest oturumunu açar). Bir test
-başarısız olursa, hangi özelliğin bozulduğunu adından anlayabilirsin.
-"""
-
-import os
-import sys
-import shutil
-from unittest.mock import patch
-
-import pytest
-from streamlit.testing.v1 import AppTest
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+from ml.components.roulette_wheel import render_roulette_wheel
+from ml.recommendation_engine import RecommendationEngine
 
 # =============================================================================
-# ORTAK YARDIMCI VERİLER
+# SAYFA YAPILANDIRMASI
 # =============================================================================
 
-def make_fake_items(n=10, id_start=1):
-    """Sahte film verisi üretir (gerçek TMDB'ye hiç gitmeden)."""
-    return [
-        {
-            "id": id_start + i,
-            "title": f"Test Film {id_start + i}",
-            "vote_average": 6.5 + (i % 4) * 0.5,
-            "overview": f"Test filmi {id_start + i} için örnek bir açıklama metni.",
-            "poster_url": None,
-            "release_date": "2020-01-01",
-            "content_type": "movie",
-            "popularity": 100 - i,
-            "genre_ids": [18],
+st.set_page_config(
+    page_title="CineRoulette 🎬 - Ne İzleyeceğine Karar Ver",
+    page_icon="🎰",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Streamlit'in `set_page_config`'i meta açıklama / sosyal medya önizleme
+# etiketlerini (Open Graph, Twitter Card) desteklemiyor — bunları JS ile
+# sayfanın gerçek <head> kısmına ekliyoruz. Bu hem Google'ın arama
+# sonuçlarında gösterdiği açıklamayı hem de WhatsApp/Twitter gibi
+# uygulamalarda linki paylaşınca çıkan önizleme kartını iyileştirir.
+st.iframe(
+    """
+    <script>
+    (function() {
+        try {
+            const head = window.parent.document.head;
+            const metaTags = [
+                {name: "description", content: "CineRoulette — Ne izleyeceğine karar veremedin mi? Ruh haline göre film/dizi öner, çarkı çevir ya da bir kart çek. Ücretsiz, hesap gerektirmez."},
+                {property: "og:title", content: "CineRoulette 🎬 - Ne İzleyeceğine Karar Ver"},
+                {property: "og:description", content: "Ruh haline göre film/dizi öner, çarkı çevir ya da bir kart çek."},
+                {property: "og:type", content: "website"},
+                {name: "twitter:card", content: "summary"},
+                {name: "twitter:title", content: "CineRoulette 🎬"},
+                {name: "twitter:description", content: "Ne izleyeceğine karar veremedin mi? Çarkı çevir ya da bir kart çek."},
+            ];
+            metaTags.forEach(function(tagInfo) {
+                const key = tagInfo.name ? "name" : "property";
+                const value = tagInfo.name || tagInfo.property;
+                let el = head.querySelector('meta[' + key + '="' + value + '"]');
+                if (!el) {
+                    el = window.parent.document.createElement("meta");
+                    el.setAttribute(key, value);
+                    head.appendChild(el);
+                }
+                el.setAttribute("content", tagInfo.content);
+            });
+        } catch (e) {
+            // Sandbox kısıtlaması olursa sessizce geç, sayfanın geri kalanını bozmasın.
         }
-        for i in range(n)
-    ]
-
-
-@pytest.fixture(autouse=True)
-def streamlit_onbellegini_temizle():
-    """
-    Streamlit'in @st.cache_data / @st.cache_resource önbellekleri süreç
-    genelinde (tüm AppTest oturumları arasında) paylaşılır. Bu, bir testin
-    diğerini yanlışlıkla etkilemesine (eski sahte veriyi görmesine) yol
-    açabilir. Her testten önce temizliyoruz.
-    """
-    import streamlit as st
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    yield
-
-
-@pytest.fixture(autouse=True)
-def temiz_favoriler_dosyasi():
-    """
-    Her testten önce ve sonra favoriler/geri bildirim dosyalarını temizler
-    (testler birbirini etkilemesin). Uygulama artık oturum bazlı dosyalar
-    kullandığı için (data/favorites_<sid>.json, data/feedback_<sid>.json),
-    hem eski (paylaşılan) dosya adlarını hem de data/ klasörünü temizliyoruz.
-    """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    legacy_paths = [
-        os.path.join(base_dir, "user_favorites.json"),
-        os.path.join(base_dir, "user_feedback.json"),
-    ]
-    data_dir = os.path.join(base_dir, "data")
-
-    def _temizle():
-        for p in legacy_paths:
-            if os.path.exists(p):
-                os.remove(p)
-        if os.path.isdir(data_dir):
-            shutil.rmtree(data_dir, ignore_errors=True)
-
-    _temizle()
-    yield
-    _temizle()
-
-
-@pytest.fixture(autouse=True)
-def sahte_api_anahtari(monkeypatch):
-    """Gerçek .env dosyasına dokunmadan sahte bir API anahtarı sağlar."""
-    monkeypatch.setenv("TMDB_API_KEY", "test_dummy_key")
-
-
-def _mocked_app(discover_return=None, get_random_return=None, watch_providers_return=None, trailer_key_return=None):
-    """TMDB ağ çağrıları sahte verilerle değiştirilmiş bir AppTest oturumu döndürür."""
-    discover_return = discover_return if discover_return is not None else make_fake_items()
-    get_random_return = get_random_return if get_random_return is not None else make_fake_items()
-    watch_providers_return = watch_providers_return or {"flatrate": [], "rent": [], "buy": []}
-
-    patches = [
-        patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None),
-        patch("utils.tmdb_client.TMDBClient.discover_movies", return_value=discover_return),
-        patch("utils.tmdb_client.TMDBClient.discover_tv_shows", return_value=discover_return),
-        patch("utils.tmdb_client.TMDBClient.get_random_content", return_value=get_random_return),
-        patch("utils.tmdb_client.TMDBClient.get_watch_providers", return_value=watch_providers_return),
-        patch("utils.tmdb_client.TMDBClient.get_trailer_key", return_value=trailer_key_return),
-        patch("utils.tmdb_client.TMDBClient.get_popular_movies", return_value=[]),
-        patch("utils.tmdb_client.TMDBClient.get_popular_tv_shows", return_value=[]),
-    ]
-    for p in patches:
-        p.start()
-
-    at = AppTest.from_file("app.py")
-    at.run(timeout=30)
-
-    # Uygulama artık en az bir ruh hali/tür seçilmeden çark/kart bölümünü
-    # göstermiyor. Testlerin çoğu hangi ruh hali olduğuyla ilgilenmediği
-    # için, burada varsayılan olarak bir tane seçiyoruz — spesifik bir mod/
-    # tür/favoriler/rastgele davranışı test eden fonksiyonlar zaten kendi
-    # seçimlerini ayrıca yapıyor (bu varsayılanın üzerine yazılır).
-    mood_widget = next((m for m in at.multiselect if m.key == "mood_multiselect"), None)
-    if mood_widget is not None:
-        mood_widget.select("aglamalik").run(timeout=30)
-    return at, patches
-
-
-def _stop_patches(patches):
-    for p in patches:
-        p.stop()
-
-
-# =============================================================================
-# 1) TEMEL AÇILIŞ TESTLERİ
-# =============================================================================
-
-def test_uygulama_hatasiz_aciliyor():
-    """Uygulama, geçerli bir API anahtarıyla hiçbir hata vermeden açılmalı."""
-    at, patches = _mocked_app()
-    try:
-        assert len(at.exception) == 0, f"Beklenmeyen hata(lar): {list(at.exception)}"
-    finally:
-        _stop_patches(patches)
-
-
-def test_api_anahtari_yoksa_uyari_gosteriliyor():
-    """API anahtarı geçersizse kullanıcı dostu bir hata mesajı gösterilmeli, çökme olmamalı."""
-    with patch("utils.tmdb_client.TMDBClient.__init__", side_effect=ValueError("API anahtarı yok")):
-        at = AppTest.from_file("app.py")
-        at.run(timeout=30)
-        assert len(at.exception) == 0
-        error_texts = [e.value for e in at.error]
-        assert any("API anahtarı" in (t or "") for t in error_texts)
-
-
-def test_dort_filtre_modu_da_var():
-    """Sidebar'da tam olarak 4 filtreleme modu (ruh hali/tür/favoriler/rastgele) olmalı."""
-    at, patches = _mocked_app()
-    try:
-        radio = at.sidebar.radio(key="filter_mode")
-        assert len(radio.options) == 4
-        beklenen_etiketler = {"🎭 Ruh Haline Göre", "🎬 Türe Göre", "❤️ Favorilerimden", "🎲 Rastgele"}
-        assert set(radio.options) == beklenen_etiketler
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 2) FİLTRE MODU GEÇİŞLERİ (BİRBİRİNİ DIŞLAMA)
-# =============================================================================
-
-@pytest.mark.parametrize("mode", ["mood", "genre", "favorites", "random"])
-def test_her_filtre_moduna_gecis_hatasiz(mode):
-    """Her filtreleme moduna geçiş sorunsuz çalışmalı (hiçbiri diğerini bozmamalı)."""
-    at, patches = _mocked_app()
-    try:
-        at.sidebar.radio(key="filter_mode").set_value(mode).run(timeout=30)
-        assert len(at.exception) == 0, f"'{mode}' moduna geçişte hata: {list(at.exception)}"
-    finally:
-        _stop_patches(patches)
-
-
-def test_ruh_hali_ve_tur_ayni_anda_secilemiyor():
-    """Tür seçiliyken mood widget'ı, mood seçiliyken tür widget'ı görünmemeli (karşılıklı dışlama)."""
-    at, patches = _mocked_app()
-    try:
-        at.sidebar.radio(key="filter_mode").set_value("mood").run(timeout=30)
-        mood_widget = next((m for m in at.multiselect if m.key == "mood_multiselect"), None)
-        genre_widget = next((m for m in at.multiselect if m.key == "genre_multiselect"), None)
-        assert mood_widget is not None
-        assert genre_widget is None
-
-        at.sidebar.radio(key="filter_mode").set_value("genre").run(timeout=30)
-        mood_widget2 = next((m for m in at.multiselect if m.key == "mood_multiselect"), None)
-        genre_widget2 = next((m for m in at.multiselect if m.key == "genre_multiselect"), None)
-        assert mood_widget2 is None
-        assert genre_widget2 is not None
-    finally:
-        _stop_patches(patches)
-
-
-def test_tek_ruh_hali_secilince_hatasiz():
-    """Tek bir ruh hali seçilince (anahtar kelime daraltması devreye girer) hata olmamalı."""
-    at, patches = _mocked_app()
-    try:
-        at.sidebar.radio(key="filter_mode").set_value("mood").run(timeout=30)
-        at.multiselect(key="mood_multiselect").select("aglamalik").run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 3) ÇARK TESTLERİ
-# =============================================================================
-
-def test_cark_cevrilebiliyor():
-    """'Çarkı Çevir!' butonuna basınca hata olmamalı."""
-    at, patches = _mocked_app()
-    try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_cark_sonucu_favorilere_eklenebiliyor():
-    """Çark döndükten sonra çıkan kazananı favorilere eklemek hatasız çalışmalı."""
-    at, patches = _mocked_app()
-    try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-
-        dialog_fav_btn = next((b for b in at.button if "dialog_wheel_result_fav" in (b.key or "")), None)
-        assert dialog_fav_btn is not None, "Kazanan pop-up'ı açılmadı"
-        dialog_fav_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_yetersiz_sonucta_uyari_gosteriliyor():
-    """Çark için yeterli sonuç yoksa (1 tane), uyarı gösterilmeli, hata değil."""
-    at, patches = _mocked_app(discover_return=make_fake_items(n=1))
-    try:
-        warning_texts = [w.value for w in at.warning]
-        assert any("yeterli sonuç yok" in (t or "") for t in warning_texts)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 4) FAVORİLER TESTLERİ
-# =============================================================================
-
-def test_favori_ekleme_ve_kaldirma():
-    """Bir içeriği favorilere ekleyip kaldırmak hatasız çalışmalı."""
-    at, patches = _mocked_app()
-    try:
-        fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
-        fav_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        tabs_favoriler = next((t for t in at.tabs if "Favorilerim" in t.label), None)
-        # Favoriler sekmesine gecip metriklerin gorundugunu kontrol edelim
-        metric_values = [m.value for m in at.metric]
-        assert "1" in metric_values
-    finally:
-        _stop_patches(patches)
-
-
-def test_favoriler_modunda_bos_liste_uyarisi():
-    """Favori hiç yokken 'Favorilerimden' modu seçilirse bilgi mesajı gösterilmeli, çökme olmamalı."""
-    at, patches = _mocked_app()
-    try:
-        at.sidebar.radio(key="filter_mode").set_value("favorites").run(timeout=30)
-        assert len(at.exception) == 0
-        info_texts = [i.value for i in at.info]
-        assert any("favori eklememişsin" in (t or "") for t in info_texts)
-    finally:
-        _stop_patches(patches)
-
-
-def test_favorilerden_cark_cevriliyor():
-    """En az 2 favori eklendikten sonra 'Favorilerimden' modunda çark çevrilebilmeli."""
-    at, patches = _mocked_app()
-    try:
-        for _ in range(2):
-            fav_btn = next((b for b in at.button if "Favorilere Ekle" in (b.label or "")), None)
-            assert fav_btn is not None
-            fav_btn.click().run(timeout=30)
-
-        at.sidebar.radio(key="filter_mode").set_value("favorites").run(timeout=30)
-        spin_btn = next((b for b in at.button if "Çarkı Çevir" in (b.label or "")), None)
-        assert spin_btn is not None, "Favorilerle çark butonu görünmüyor"
-        spin_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_id_sifir_olan_icerik_favoriye_eklenebiliyor():
-    """Kenar durum: id'si tam olarak 0 olan bir içerik de favoriye eklenebilmeli."""
-    from utils.favorites_manager import FavoritesManager
-    import streamlit as st
-
-    fm = FavoritesManager()
-    ok, _ = fm.toggle({"id": 0, "title": "Sifir ID'li Film", "content_type": "movie"})
-    assert ok is True, "id=0 olan içerik favoriye eklenemedi (kenar durum hatası)"
-
-
-# =============================================================================
-# 5) AI ÖNERİLERİ TESTLERİ
-# =============================================================================
-
-def test_ai_onerileri_favori_olmadan_uyari_veriyor():
-    """Favori yokken AI sekmesinde uyarı gösterilmeli, hesaplama yapılmamalı."""
-    at, patches = _mocked_app()
-    try:
-        tab_ai_idx = 1
-        assert len(at.exception) == 0
-        warning_texts = [w.value for w in at.warning]
-        assert any("önce favorilerine" in (t or "") for t in warning_texts)
-    finally:
-        _stop_patches(patches)
-
-
-def test_ai_onerileri_hesaplaniyor():
-    """Favori eklendikten sonra 'Önerileri Hesapla' butonuna basınca öneriler gelmeli."""
-    at, patches = _mocked_app()
-    try:
-        fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
-        fav_btn.click().run(timeout=30)
-
-        compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
-        assert compute_btn is not None
-        compute_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_oneri_motoru_benzerlik_skorlari_anlamli():
-    """
-    ML motoru, tür eşleşen içerikleri alakasız içeriklerden belirgin şekilde
-    ayırt etmeli (eskiden tüm skorlar birbirine çok yakın ve düşük çıkıyordu).
-    """
-    from ml.recommendation_engine import RecommendationEngine
-
-    engine = RecommendationEngine()
-    favorites = [
-        {"id": 1, "title": "Korku Filmi", "overview": "Karanlık bir evde yaşanan korkunç olaylar.", "genre_ids": [27]},
-    ]
-    candidates = [
-        {"id": 10, "title": "Benzer Korku", "overview": "Lanetli bir ev ve içindeki hayaletler.", "genre_ids": [27], "vote_average": 7.0},
-        {"id": 11, "title": "Alakasız Belgesel", "overview": "Okyanusların derinliklerindeki yaşam formları.", "genre_ids": [99], "vote_average": 8.0},
-    ]
-    results = engine.get_recommendations(favorites, candidates, top_n=5)
-
-    assert len(results) == 2
-    by_id = {r["id"]: r["similarity_score"] for r in results}
-    assert by_id[10] > by_id[11], "Tür eşleşen içerik, alakasız içerikten daha yüksek skor almalı"
-    assert by_id[10] - by_id[11] > 0.2, "Skorlar arasında anlamlı bir fark olmalı (eski düşük-benzerlik hatası)"
-
-
-# =============================================================================
-# 6) SAYFALAMA ("DAHA FAZLA GÖSTER") TESTLERİ
-# =============================================================================
-
-def test_daha_fazla_goster_sayisi_artiriyor():
-    """
-    Havuz artık çeşitlilik için baştan büyütülüyor (60'a kadar), bu yüzden
-    filtre seçilince liste zaten ~60 sonuçla açılmalı. 'Daha fazla göster'
-    butonuna basınca sayı yine de artmaya devam etmeli (61. sayfadan sonrası).
-    """
-    from utils.tmdb_client import ResultList
-
-    def fake_discover(**kwargs):
-        page = kwargs.get("page", 1)
-        r = ResultList()
-        start = (page - 1) * 20
-        for i in range(start, start + 20):
-            r.append({"id": i, "title": f"Film {i}", "vote_average": 7.0, "overview": "x",
-                       "poster_url": None, "release_date": "2020-01-01",
-                       "content_type": "movie", "popularity": 100 - i,
-                       "genre_ids": [35]})  # Komedi birincil tur olarak
-        r.total_results = 500
-        return r
-
-    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
-         patch("utils.tmdb_client.TMDBClient.discover_movies", side_effect=fake_discover):
-        at = AppTest.from_file("app.py")
-        at.run(timeout=30)
-
-        at.sidebar.radio(key="filter_mode").set_value("genre").run(timeout=30)
-        at.multiselect(key="genre_multiselect").select("komedi").run(timeout=30)
-
-        # Havuz artık kendiliğinden ~60 sonuca kadar genişliyor
-        label_after_select = at.expander[0].label
-        assert "60 /" in label_after_select, f"Havuz genişletme çalışmadı: {label_after_select}"
-
-        load_more_btn = next(b for b in at.button if "Daha fazla" in (b.label or ""))
-        load_more_btn.click().run(timeout=30)
-        label_after_click = at.expander[0].label
-        assert "80 /" in label_after_click, f"Daha fazla göster sayıyı artırmadı: {label_after_click}"
-        assert len(at.exception) == 0
-
-
-# =============================================================================
-# 7) YIL FİLTRESİ DOĞRULUĞU
-# =============================================================================
-
-def test_yil_filtresi_yanlis_esleseni_eliyor():
-    """
-    TMDB bazen filtrelenen yıldan farklı bir release_date döndürebiliyor;
-    istemci tarafı ek kontrolümüz bunu doğru şekilde elemeli.
-    """
-    from utils.tmdb_client import ResultList
-    from app import _discover
-
-    def fake_discover(**kwargs):
-        r = ResultList()
-        r.append({"id": 1, "title": "Yanlış Yıl", "release_date": "2016-05-01", "vote_average": 7.0})
-        r.append({"id": 2, "title": "Doğru Yıl", "release_date": "2026-03-01", "vote_average": 7.5})
-        r.total_results = 2
-        return r
-
-    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
-         patch.dict(os.environ, {"TMDB_API_KEY": "dummy"}):
-        from utils.tmdb_client import TMDBClient
-        tmdb = TMDBClient()
-        tmdb.discover_movies = lambda **kw: fake_discover(**kw)
-
-        result = _discover(tmdb, [], [], (0.0, 10.0), (2026, 2026), None, "popularity.desc", "movie", 1)
-
-        assert len(result) == 1
-        assert result[0]["id"] == 2, "Yanlış yıla ait sonuç filtrelenemedi"
-
-
-# =============================================================================
-# 8) KART DESTESİ MODU TESTLERİ
-# =============================================================================
-
-def test_kart_destesi_moduna_gecilebiliyor():
-    """'🃏 Kart Çek' moduna geçiş hatasız çalışmalı ve 8 kart gösterilmeli."""
-    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
-    try:
-        mode_radio = at.radio(key="selection_mode")
-        assert set(mode_radio.options) == {"🎡 Çark", "🃏 Kart Çek"}
-        mode_radio.set_value("cards").run(timeout=30)
-        assert len(at.exception) == 0
-
-        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
-        assert len(deck_btns) == 8
-    finally:
-        _stop_patches(patches)
-
-
-def test_kart_secince_sonuc_acidiyor():
-    """Bir kart seçilince kazananın pop-up'ı (favori butonuyla) açılmalı."""
-    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
-    try:
-        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
-        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
-        deck_btns[0].click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        dialog_btn = next((b for b in at.button if "dialog_wheel_result_fav" in (b.key or "")), None)
-        assert dialog_btn is not None, "Kart seçimi sonrası pop-up açılmadı"
-    finally:
-        _stop_patches(patches)
-
-
-def test_yeni_deste_karistir_calisiyor():
-    """'Yeni Deste Karıştır' butonuna basmak hatasız çalışmalı."""
-    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
-    try:
-        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
-        reshuffle_btn = next(b for b in at.button if b.key == "deck_reshuffle_btn")
-        reshuffle_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_cark_ve_kart_modlari_arasi_gecis_sorunsuz():
-    """Çark ↔ Kart Çek arasında ileri geri geçiş, her ikisinin de işlevini bozmamalı."""
-    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
-    try:
-        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
-        at.radio(key="selection_mode").set_value("wheel").run(timeout=30)
-        spin_btn = next((b for b in at.button if "Çarkı Çevir" in (b.label or "")), None)
-        assert spin_btn is not None
-        spin_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 9) İZLEDİM / BEĞENMEDİM GERİ BİLDİRİM TESTLERİ
-# =============================================================================
-
-def test_feedback_manager_begendim_havuzdan_cikarmiyor():
-    """
-    'Beğendim' işareti artık havuzdan ÇIKARMAMALI (sadece pozitif bir kayıt) —
-    sadece 'Beğenmedim' işareti havuzdan çıkarmalı.
-    """
-    from utils.feedback_manager import FeedbackManager
-
-    fm = FeedbackManager()
-    fm.mark_watched({"id": 100, "title": "Test", "content_type": "movie"})
-    assert fm.is_watched(100) is True
-    assert fm.is_disliked(100) is False
-
-    pool = [{"id": 100}, {"id": 101}]
-    filtered = fm.filter_pool(pool)
-    assert len(filtered) == 2, "Beğenilen içerik havuzdan çıkarılmamalı"
-
-    fm.mark_disliked({"id": 101, "title": "Test2", "content_type": "movie"})
-    filtered2 = fm.filter_pool(pool)
-    assert len(filtered2) == 1
-    assert filtered2[0]["id"] == 100, "Beğenilmeyen içerik havuzdan çıkarılmalı"
-
-
-def test_feedback_manager_begenmedim_izlendiyi_geri_alir():
-    """Bir içerik önce 'bu değildi' sonra 'izledim' olarak işaretlenirse, sadece 'izledim' listesinde kalmalı."""
-    from utils.feedback_manager import FeedbackManager
-
-    fm = FeedbackManager()
-    fm.mark_disliked({"id": 200, "title": "Test", "content_type": "movie"})
-    assert fm.is_disliked(200) is True
-
-    fm.mark_watched({"id": 200, "title": "Test", "content_type": "movie"})
-    assert fm.is_disliked(200) is False, "Fikir değiştirince eski işaret kalmamalı"
-    assert fm.is_watched(200) is True
-
-
-def test_pop_upta_izledim_begenmedim_butonlari_var():
-    """Çark/kart sonucu pop-up'ında İzledim ve Bu Değildi butonları görünmeli."""
-    at, patches = _mocked_app()
-    try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-
-        watched_btn = next((b for b in at.button if b.key == "dialog_watched"), None)
-        disliked_btn = next((b for b in at.button if b.key == "dialog_disliked"), None)
-        assert watched_btn is not None, "Pop-up'ta İzledim butonu yok"
-        assert disliked_btn is not None, "Pop-up'ta Bu Değildi butonu yok"
-    finally:
-        _stop_patches(patches)
-
-
-def test_pop_upta_izledim_tiklamak_hatasiz():
-    """Pop-up'ta 'İzledim' butonuna basmak hatasız çalışmalı."""
-    at, patches = _mocked_app()
-    try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-
-        watched_btn = next(b for b in at.button if b.key == "dialog_watched")
-        watched_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_listedeki_karttan_begenmedim_favoriden_de_kaldiriyor():
-    """
-    Bir içerik favorilere eklendikten sonra listeden 'Bu Değildi' denirse,
-    hem geri bildirim listesine eklenmeli hem de favorilerden kaldırılmalı.
-    """
-    at, patches = _mocked_app()
-    try:
-        # Once favoriye ekle
-        fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
-        fav_btn.click().run(timeout=30)
-
-        # Ayni icerigin "Bu Degildi" butonunu bul (favori butonuyla ayni idx/key_prefix'i paylasir)
-        disliked_btn = next((b for b in at.button if (b.key or "").startswith("disliked_")), None)
-        assert disliked_btn is not None
-        disliked_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_karttan_secilen_filmde_de_feedback_butonlari_var():
-    """Kart destesinden çıkan sonuçta da İzledim/Bu Değildi butonları olmalı."""
-    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
-    try:
-        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
-        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
-        deck_btns[0].click().run(timeout=30)
-
-        watched_btn = next((b for b in at.button if b.key == "dialog_watched"), None)
-        assert watched_btn is not None
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_begendim_sonrasi_kalici_rozet_gorunuyor():
-    """
-    'Beğendim' butonuna basıldıktan sonra, o kart bir daha 'Beğendim' butonunu
-    göstermemeli — favori butonundaki gibi kalıcı bir duruma geçmeli.
-    (Not: AppTest, st.dialog içindeki st.success mesajlarını ayrı bir katmanda
-    render ettiği için doğrudan izleyemiyor; bu yüzden burada ölçülebilir asıl
-    davranışı — butonun kalıcı olarak kaybolmasını — doğruluyoruz.)
-    """
-    at, patches = _mocked_app()
-    try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-
-        watched_btn = next(b for b in at.button if b.key == "dialog_watched")
-        watched_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        watched_btn_after = next((b for b in at.button if b.key == "dialog_watched"), None)
-        assert watched_btn_after is None, "İşaretlendikten sonra buton hâlâ görünüyor, rozete dönüşmedi"
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 10) FİLM ARAMA TESTLERİ
-# =============================================================================
-
-def test_favoriler_sayfasinda_arama_kutusu_var():
-    """Favoriler sayfasında arama kutusu ve butonu görünmeli."""
-    at, patches = _mocked_app()
-    try:
-        search_input = next((i for i in at.text_input if i.key == "fav_search_query"), None)
-        search_btn = next((b for b in at.button if b.key == "fav_search_btn"), None)
-        assert search_input is not None
-        assert search_btn is not None
-    finally:
-        _stop_patches(patches)
-
-
-def test_arama_sonuclari_favoriye_eklenebiliyor():
-    """Arama sonucu gelen bir film favorilere eklenebilmeli."""
-    at, patches = _mocked_app()
-    try:
-        with patch("utils.tmdb_client.TMDBClient.search_movies", return_value=make_fake_items(n=3, id_start=500)):
-            search_input = next(i for i in at.text_input if i.key == "fav_search_query")
-            search_input.set_value("test film").run(timeout=30)
-            search_btn = next(b for b in at.button if b.key == "fav_search_btn")
-            search_btn.click().run(timeout=30)
-            assert len(at.exception) == 0
-
-            fav_btn = next((b for b in at.button if "favsearch" in (b.key or "") and "fav_" in (b.key or "")), None)
-            assert fav_btn is not None, "Arama sonuçlarında favori butonu yok"
-            fav_btn.click().run(timeout=30)
-            assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 11) BEĞENDİKLERİM / BEĞENMEDİKLERİM SAYFASI TESTLERİ
-# =============================================================================
-
-def test_gecmis_sekmesi_hatasiz_aciliyor():
-    """'Geri Bildirimlerim' sekmesi (Beğendiklerim/Beğenmediklerim) hatasız açılmalı."""
-    at, patches = _mocked_app()
-    try:
-        assert len(at.exception) == 0
-        tab_labels = [t.label for t in at.tabs]
-        assert any("Geri Bildirimlerim" in (t or "") for t in tab_labels)
-    finally:
-        _stop_patches(patches)
-
-
-def test_begenilmeyen_gerial_alinabiliyor():
-    """Bir içerik 'Beğenmedim' olarak işaretlendikten sonra 'Geri Al' ile geri alınabilmeli."""
-    at, patches = _mocked_app()
-    try:
-        disliked_btn = next(b for b in at.button if (b.key or "").startswith("disliked_"))
-        disliked_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        undo_btn = next((b for b in at.button if (b.key or "").startswith("undo_disliked_")), None)
-        assert undo_btn is not None, "'Geri Al' butonu bulunamadı"
-        undo_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 12) FRAGMAN GÖMME TESTLERİ
-# =============================================================================
-
-def test_fragman_varsa_expander_gosteriliyor():
-    """Fragman anahtarı bulunursa pop-up'ta '🎬 Fragmanı İzle' bölümü çıkmalı."""
-    at, patches = _mocked_app(trailer_key_return="dQw4w9WgXcQ")
-    try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        expander_labels = [e.label for e in at.expander]
-        assert any("Fragmanı İzle" in (lbl or "") for lbl in expander_labels)
-    finally:
-        _stop_patches(patches)
-
-
-def test_fragman_yoksa_hata_vermiyor():
-    """Fragman bulunamazsa (None dönerse) uygulama hatasız çalışmaya devam etmeli."""
-    at, patches = _mocked_app(trailer_key_return=None)
-    try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        expander_labels = [e.label for e in at.expander]
-        assert not any("Fragmanı İzle" in (lbl or "") for lbl in expander_labels)
-    finally:
-        _stop_patches(patches)
-
-
-def test_tmdb_client_trailer_key_secimi():
-    """TMDBClient.get_trailer_key: Trailer tipini Teaser'a tercih etmeli, YouTube olmayanları yok saymalı."""
-    from unittest.mock import patch as mock_patch
-    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
-         mock_patch.dict(os.environ, {"TMDB_API_KEY": "dummy"}):
-        from utils.tmdb_client import TMDBClient
-        tmdb = TMDBClient()
-
-        fake_videos = {"results": [
-            {"site": "YouTube", "type": "Teaser", "key": "teaser123"},
-            {"site": "YouTube", "type": "Trailer", "key": "trailer456"},
-            {"site": "Vimeo", "type": "Trailer", "key": "vimeo789"},
-        ]}
-        tmdb._make_request = lambda *a, **kw: fake_videos
-        assert tmdb.get_trailer_key(1, "movie") == "trailer456"
-
-        tmdb._make_request = lambda *a, **kw: {"results": []}
-        assert tmdb.get_trailer_key(1, "movie") is None
-
-
-# =============================================================================
-# 13) PAYLAŞILABİLİR SONUÇ KARTI TESTLERİ
-# =============================================================================
-
-def test_share_card_posterisiz_uretiliyor():
-    """Poster URL'si olmayan bir içerik için bile paylaşım görseli üretilebilmeli."""
-    from utils.share_card import generate_share_card
-
-    winner = {"title": "Test Filmi", "vote_average": 7.5, "poster_url": None}
-    result = generate_share_card(winner)
-    assert result is not None
-    assert len(result) > 0
-    assert result[:8] == b"\x89PNG\r\n\x1a\n", "Gecerli bir PNG dosyasi olmali"
-
-
-def test_share_card_uzun_baslikla_calisiyor():
-    """Çok uzun bir film başlığı satır kaydırma ile sorunsuz işlenmeli."""
-    from utils.share_card import generate_share_card
-
-    winner = {
-        "title": "Bu Gerçekten Çok Ama Çok Uzun Bir Film Başlığı Test Amaçlı Yazılmıştır",
-        "vote_average": 6.2,
-        "poster_url": None,
+    })();
+    </script>
+    """,
+    height=1,
+)
+
+# Koyu (Netflix tarzı) tema
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #141414;
+        color: #f5f5f5;
     }
-    result = generate_share_card(winner)
-    assert result is not None
+
+    section[data-testid="stSidebar"] {
+        background-color: #1a1a1a;
+    }
+
+    .main-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 4px 20px;
+        border-bottom: 1px solid #2a2a2a;
+        margin-bottom: 24px;
+    }
+    .main-header h1 {
+        font-size: 28px;
+        font-weight: 700;
+        color: #fff;
+        margin: 0;
+    }
+    .main-header h1 span { color: #e50914; }
+    .main-header p {
+        color: #999;
+        font-size: 13px;
+        margin: 2px 0 0;
+    }
+
+    .section-title {
+        font-size: 17px;
+        font-weight: 600;
+        color: #f5f5f5;
+        margin: 4px 0 14px;
+    }
+
+    .content-card {
+        background: #1f1f1f;
+        border: 1px solid #2a2a2a;
+        border-radius: 10px;
+        padding: 12px;
+        transition: transform 0.15s ease, border-color 0.15s ease;
+    }
+    .content-card:hover {
+        transform: translateY(-4px);
+        border-color: #e50914;
+    }
+
+    .similarity-badge {
+        background: #2a9d8f;
+        color: #fff;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: 600;
+    }
+
+    /* Streamlit widget'larını koyu temaya uydur */
+    div[data-testid="stMetric"] {
+        background: #1f1f1f;
+        border: 1px solid #2a2a2a;
+        border-radius: 10px;
+        padding: 10px;
+    }
+    .stButton > button {
+        border-radius: 8px;
+        border: 1px solid #3a3a3a;
+        background: #262626;
+        color: #f5f5f5;
+        min-height: 2.6rem;
+    }
+    .stButton > button:hover {
+        border-color: #e50914;
+        color: #fff;
+    }
+    .stTabs [data-baseweb="tab"] {
+        color: #999;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #fff !important;
+    }
+
+    /* Üstteki varsayılan beyaz Streamlit araç çubuğunu koyu temaya uydur */
+    header[data-testid="stHeader"] {
+        background-color: #141414;
+    }
+    div[data-testid="stDecoration"] {
+        background-image: none;
+        background-color: #141414;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
-def test_pop_upta_paylas_bolumu_var():
-    """Çark/kart sonucu pop-up'ında '📤 Paylaş' bölümü ve indirme butonu görünmeli."""
-    at, patches = _mocked_app()
+# =============================================================================
+# İNİTİALİZASYON
+# =============================================================================
+
+@st.cache_resource
+def init_tmdb_client() -> Optional[TMDBClient]:
+    """TMDB istemcisini başlat."""
     try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        expander_labels = [e.label for e in at.expander]
-        assert any("Paylaş" in (lbl or "") for lbl in expander_labels)
-
-        download_btn = next((b for b in at.download_button if b.key == "download_share_card"), None)
-        assert download_btn is not None
-    finally:
-        _stop_patches(patches)
+        return TMDBClient()
+    except ValueError:
+        return None
 
 
-def test_share_card_mod_gore_farkli_cta_metni():
-    """generate_share_card, geçirilen cta_text'i kullanmalı (çark/kart moduna göre farklı olabilir)."""
-    from utils.share_card import generate_share_card
-
-    winner = {"title": "Test", "vote_average": 7.0, "poster_url": None}
-    r1 = generate_share_card(winner, cta_text="Çarkı sen de çevir!")
-    r2 = generate_share_card(winner, cta_text="Sen de bir kart çek!")
-    assert r1 is not None and r2 is not None
-    assert r1 != r2, "Farklı CTA metinleriyle üretilen görseller farklı olmalı"
+@st.cache_resource
+def init_ml_engine() -> RecommendationEngine:
+    """ML motorunu başlat."""
+    return RecommendationEngine()
 
 
-def test_karttan_gelen_paylasimda_kart_cta_kullaniliyor():
-    """Kart destesinden çıkan sonuçta paylaşım görseli 'kart çek' CTA'sını kullanmalı."""
-    at, patches = _mocked_app(discover_return=make_fake_items(n=12))
+def _sync_session_id_to_browser(session_id: str) -> None:
+    """Oturum kimliğini tarayıcının localStorage'ına yazar (yedek kurtarma için)."""
+    st.iframe(
+        f"""
+        <script>
+        try {{ window.parent.localStorage.setItem('cineroulette_sid', '{session_id}'); }} catch (e) {{}}
+        </script>
+        """,
+        height=1,
+    )
+
+
+def get_or_create_session_id() -> str:
+    """
+    Her tarayıcı oturumu (ziyaretçi) için benzersiz bir kimlik üretir/döndürür.
+
+    ÖNEMLİ: Uygulama artık birden fazla gerçek kullanıcı tarafından aynı anda
+    kullanılabildiği için, favoriler/geri bildirimler bu kimliğe özel ayrı
+    dosyalarda tutulur — aksi halde tüm ziyaretçilerin verileri tek bir ortak
+    dosyada birbirinin üzerine yazılırdı.
+
+    Kimlik hem `st.session_state`'te (bu oturum boyunca) hem de URL'nin
+    query param'ında (`?sid=...`) tutulur — böylece kullanıcı sayfayı
+    yenilese (F5) bile aynı kimliğe (ve dolayısıyla aynı favori/geri
+    bildirim verisine) geri dönebilir.
+
+    EK GÜVENCE: Kimlik ayrıca tarayıcının localStorage'ına da yazılır. Eğer
+    kullanıcı `?sid=` İÇERMEYEN bir linkten girerse (ör. tarayıcı geçmişi,
+    yer imi, ana ekran kısayolu — gerçek kullanıcılardan gelen "favorilerim
+    her girişte kayboluyor" geri bildirimi büyük ihtimalle bu yüzdendi),
+    localStorage'da daha önce kaydedilmiş bir kimlik varsa sayfa otomatik
+    olarak o kimlikle yeniden yüklenir, veriler kaybolmaz.
+    """
+    if "session_id" in st.session_state:
+        return st.session_state["session_id"]
+
+    existing = st.query_params.get("sid")
+    if existing:
+        st.session_state["session_id"] = existing
+        _sync_session_id_to_browser(existing)
+        return existing
+
+    # URL'de sid yok — localStorage'da kayıtlı bir kimlik olup olmadığını
+    # kontrol edip, varsa sayfayı o kimlikle yeniden yüklüyoruz.
+    st.iframe(
+        """
+        <script>
+        (function() {
+            try {
+                const saved = window.parent.localStorage.getItem('cineroulette_sid');
+                if (saved) {
+                    const url = new URL(window.parent.location.href);
+                    if (url.searchParams.get('sid') !== saved) {
+                        url.searchParams.set('sid', saved);
+                        window.parent.location.replace(url.toString());
+                    }
+                }
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=1,
+    )
+
+    new_id = uuid.uuid4().hex[:16]
+    st.session_state["session_id"] = new_id
+    st.query_params["sid"] = new_id
+    _sync_session_id_to_browser(new_id)
+    return new_id
+
+
+def init_favorites_manager(session_id: str) -> FavoritesManager:
+    """Favori yöneticisini başlat (bu oturuma özel dosyayla)."""
+    return FavoritesManager(session_id=session_id)
+
+
+def init_feedback_manager(session_id: str) -> FeedbackManager:
+    """İzledim/beğenmedim geri bildirim yöneticisini başlat (bu oturuma özel dosyayla)."""
+    return FeedbackManager(session_id=session_id)
+
+
+# =============================================================================
+# FİLTRE YARDIMCILARI
+# =============================================================================
+
+SORT_OPTIONS = {
+    "Popülerlik": "popularity.desc",
+    "Puan (yüksekten düşüğe)": "vote_average.desc",
+    "Yeni çıkanlar": "release_date.desc",
+}
+
+
+def get_mood_genre_ids(selected_moods: list[str]) -> list[int]:
+    """Seçilen ruh hallerinin tür ID'lerini birleştirir (bu grup içinde OR mantığı)."""
+    ids: set[int] = set()
+    for key in selected_moods:
+        fc = MOOD_FILTERS.get(key)
+        if fc and fc.genre_ids:
+            ids.update(fc.genre_ids)
+    return list(ids)
+
+
+def get_genre_genre_ids(selected_genres: list[str]) -> list[int]:
+    """Seçilen türlerin tür ID'lerini birleştirir (bu grup içinde OR mantığı)."""
+    ids: set[int] = set()
+    for key in selected_genres:
+        fc = GENRE_FILTERS.get(key)
+        if fc and fc.genre_ids:
+            ids.update(fc.genre_ids)
+    return list(ids)
+
+
+def get_mood_keyword_ids(selected_moods: list[str]) -> list[int]:
+    """
+    Sadece TEK bir ruh hali seçiliyse, o ruh halinin TMDB anahtar
+    kelimelerini (ör. Ağlamalık -> "tearjerker") döndürür. Bu, ruh hali
+    filtresinin salt tür eşlemesinden öteye geçip gerçekten o temaya uygun
+    içerikleri bulmasını sağlar.
+
+    Birden fazla ruh hali seçiliyse boş liste döner — çünkü hangi
+    keyword'ün hangi türle eşleşmesi gerektiği belirsizleşir (ör. "Ağlamalık
+    + Korku Gecesi" seçiliyse "tearjerker" keyword'ü korku filmlerine de
+    uygulanır mı, belirsiz). Bu durumda salt tür bazlı filtrelemeye dönülür.
+    """
+    if len(selected_moods) != 1:
+        return []
+    fc = MOOD_FILTERS.get(selected_moods[0])
+    return list(fc.keyword_ids) if fc and fc.keyword_ids else []
+
+
+def resolve_sort_by(sort_label: str, content_type: str) -> str:
+    """Sıralama etiketini TMDB'nin beklediği sort_by string'ine çevirir."""
+    sort_value = SORT_OPTIONS.get(sort_label, "popularity.desc")
+    if content_type == "tv" and sort_value.startswith("release_date"):
+        return sort_value.replace("release_date", "first_air_date")
+    return sort_value
+
+
+def _discover(
+    tmdb: TMDBClient,
+    genre_ids: list[int],
+    keyword_ids: list[int],
+    rating_range: tuple[float, float],
+    year_range: tuple[int, int],
+    runtime_range: Optional[tuple[int, int]],
+    sort_by: str,
+    content_type: str,
+    page: int,
+):
+    """Tek bir kategori grubu (sadece mood ya da sadece genre) için TMDB isteği."""
+    query_genre_ids = genre_ids
+    if content_type == "tv" and query_genre_ids:
+        query_genre_ids = get_tv_genre_ids(query_genre_ids)
+
+    common_kwargs = dict(
+        genre_ids=query_genre_ids or None,
+        keyword_ids=keyword_ids or None,
+        min_vote_average=rating_range[0],
+        max_vote_average=rating_range[1],
+        # Oy sayısı filtresi kaldırıldı (kullanıcı için anlamsız/kafa
+        # karıştırıcıydı) — sadece hiç oy almamış tamamen boş kayıtları
+        # elemek için düşük, sabit bir taban bırakıyoruz.
+        min_vote_count=5,
+        year_from=year_range[0],
+        year_to=year_range[1],
+        sort_by=sort_by,
+        page=page,
+    )
+
+    if content_type == "movie":
+        if runtime_range is not None:
+            common_kwargs["runtime_min"] = runtime_range[0]
+            common_kwargs["runtime_max"] = runtime_range[1]
+        result = tmdb.discover_movies(**common_kwargs)
+    else:
+        result = tmdb.discover_tv_shows(**common_kwargs)
+
+    # TMDB'nin `primary_release_date.gte/lte` filtresi bazen filmin
+    # gösterdiğimiz `release_date` alanından FARKLI bir bölgesel/birincil
+    # tarihe göre eşleşiyor (ör. "2026" filtrelesen bile ekranda "2016"
+    # yazan bir film çıkabiliyor). Bunu kesin olarak önlemek için,
+    # döndürülen her öğeyi gösterdiğimiz release_date'in gerçek yılına göre
+    # istemci tarafında bir kez daha süzüyoruz.
+    y_from, y_to = year_range
+    filtered = []
+    for item in result:
+        date_str = item.get("release_date") or ""
+        try:
+            year = int(date_str[:4])
+        except (ValueError, TypeError):
+            continue  # Tarihi bilinmeyen içerik, yıl filtresiyle tutarlı olmadığı için dahil edilmiyor
+        if y_from <= year <= y_to:
+            filtered.append(item)
+
+    # KATI TÜR FİLTRESİ: TMDB, bir filmi "Komedi" seçince bile o filmin
+    # TÜM türlerinden herhangi birinde Komedi geçiyorsa döndürür — ör.
+    # "Parazit" (Komedi, Gerilim, Dram) veya "Moana" (Animasyon, Macera,
+    # Komedi, Aile) gibi filmler, Komedi asıl/baskın türleri olmadığı halde
+    # çıkabiliyor. Bunu önlemek için, seçilen türlerden en az birinin o
+    # filmin TMDB'de listelediği BİRİNCİL (ilk) tür olmasını şart koşuyoruz.
+    if query_genre_ids:
+        genre_id_set = set(query_genre_ids)
+        filtered = [
+            item for item in filtered
+            if (item.get("genre_ids") or [None])[0] in genre_id_set
+        ]
+
+    total = getattr(result, "total_results", len(filtered))
+    new_result = ResultList(filtered)
+    new_result.total_results = total
+    return new_result
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_filtered_pool(
+    _tmdb: TMDBClient,
+    mood_genre_ids: tuple[int, ...],
+    mood_keyword_ids: tuple[int, ...],
+    genre_genre_ids: tuple[int, ...],
+    rating_range: tuple[float, float],
+    year_range: tuple[int, int],
+    runtime_range: Optional[tuple[int, int]],
+    sort_label: str,
+    content_type: str,
+    random_mode: bool,
+) -> tuple[list[dict], int]:
+    """
+    Filtre panelinden gelen seçimlere göre içerik havuzu getirir.
+
+    ÖNEMLİ: Ruh hali ve tür filtreleri artık arayüzde birbirini dışlıyor —
+    kullanıcı ya ruh haline ya da türe göre filtreliyor, ikisine birden
+    değil (ör. "Ağlamalık + Komedi" gibi anlamsız kombinasyonlar mümkün
+    değil). Bu yüzden `mood_genre_ids` ve `genre_genre_ids`'den sadece biri
+    doluyken, biz de sadece o grubu tek bir sorguda (grup içi VEYA/OR
+    mantığıyla) kullanıyoruz.
+
+    `mood_keyword_ids`: sadece TEK bir ruh hali seçiliyken doldurulur (ör.
+    "Ağlamalık" -> "tearjerker" anahtar kelimesi). Bu, ruh hali filtresinin
+    sadece tür eşlemesi değil, gerçek "tema" bazlı bir eşleme yapmasını
+    sağlıyor.
+
+    Sonuç sayısı azsa (< 8, çark için yetersiz), otomatik olarak 1-2 sayfa
+    daha çekip havuzu büyütmeye çalışır.
+
+    Returns:
+        (içerik_listesi, tmdb_toplam_sonuç_sayısı) tuple'ı.
+
+    `st.cache_data` ile önbelleğe alınıyor: aynı filtrelerle her widget
+    etkileşiminde (ör. çarkı çevirme) TMDB'ye tekrar istek atmak yerine
+    3 dakika boyunca aynı sonucu tekrar kullanıyoruz. `_tmdb` altçizgiyle
+    başlıyor çünkü TMDBClient nesnesi cache anahtarına dahil edilemez
+    (hash'lenemez), sadece çağrı için kullanılır.
+    """
+    tmdb = _tmdb
     try:
-        at.radio(key="selection_mode").set_value("cards").run(timeout=30)
-        deck_btns = [b for b in at.button if "deck_card_" in (b.key or "")]
-        deck_btns[0].click().run(timeout=30)
-        assert len(at.exception) == 0
+        if random_mode:
+            items = tmdb.get_random_content(
+                content_type=content_type,
+                min_vote_average=rating_range[0] or RANDOM_FILTER.min_vote_average,
+                min_vote_count=RANDOM_FILTER.min_vote_count,
+                count=16,
+            )
+            return items, len(items)
 
-        download_btn = next((b for b in at.download_button if b.key == "download_share_card"), None)
-        assert download_btn is not None
-    finally:
-        _stop_patches(patches)
+        sort_by = resolve_sort_by(sort_label, content_type)
+        mood_ids = list(mood_genre_ids)
+        keyword_ids = list(mood_keyword_ids)
+        genre_ids = list(genre_genre_ids)
+
+        # Ruh hali ve tür karşılıklı dışlayıcı olduğu için burada her zaman
+        # sadece biri dolu olur (ya da ikisi de boş = filtre yok).
+        combined_ids = mood_ids or genre_ids
+        combined_keywords = keyword_ids if mood_ids else []
+
+        def _fetch(page: int):
+            pool = _discover(tmdb, combined_ids, combined_keywords, rating_range, year_range, runtime_range, sort_by, content_type, page)
+            return list(pool), getattr(pool, "total_results", len(pool))
+
+        results, total_results = _fetch(page=1)
+
+        # Çeşitliliği artırmak için her zaman daha büyük bir aday havuzu
+        # hedefliyoruz (sadece sonuç azken değil) — yoksa havuz hep aynı
+        # ~20 "en popüler" sonuçla sınırlı kalıyor ve çark/kart tekrar tekrar
+        # aynı birkaç filmi gösteriyordu.
+        target_pool_size = 60
+        page = 2
+        while len(results) < target_pool_size and page <= 3 and total_results > len(results):
+            more, _ = _fetch(page=page)
+            existing_ids = {item.get("id") for item in results}
+            results.extend(item for item in more if item.get("id") not in existing_ids)
+            page += 1
+
+        return results, total_results
+    except Exception as e:
+        st.error(f"İçerik yüklenirken hata: {e}")
+        return [], 0
 
 
-def test_metin_paylasim_secenekleri_kaldirildi():
-    """Artık ayrı bir 'paylaşım metni' kutusu veya sadece-metin WhatsApp linki olmamalı."""
-    at, patches = _mocked_app()
+def _get_top_genres_from_favorites(favorites: list[dict], content_type: str, top_n: int = 2) -> list[int]:
+    """
+    Kullanıcının favorilerinden (SADECE aynı içerik türünde olanlardan —
+    film önerisi için dizi favorilerinin tür ID'lerini karıştırmamak
+    adına), en sık geçen tür ID'lerini çıkarır.
+    """
+    from collections import Counter
+    genre_counter = Counter()
+    for fav in favorites:
+        if fav.get("content_type", "movie") != content_type:
+            continue
+        for g in fav.get("genre_ids", []):
+            genre_counter[g] += 1
+    return [genre_id for genre_id, _ in genre_counter.most_common(top_n)]
+
+
+@st.fragment
+def _render_ai_recommendations_section(
+    tmdb: TMDBClient,
+    ml_engine: RecommendationEngine,
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    favorites: list[dict],
+    ai_content_type: str,
+    year_range: tuple[int, int],
+) -> None:
+    """
+    "Önerileri Hesapla" butonu ve sonuç grid'i.
+
+    ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi #1): Bu bölüm bir
+    fragment olarak İŞARETLENMEDEN önce, "Önerileri Hesapla" butonuna
+    basmak TÜM SAYFAYI yeniden çalıştırıyordu — ve Streamlit'in `st.tabs`
+    bileşeni tam sayfa yeniden çalıştırmalarında aktif sekmeyi hatırlamadığı
+    için, kullanıcı AI Önerileri sekmesindeyken butona bastığında sayfa
+    "Anasayfa" sekmesine sıçrıyordu. `@st.fragment` ile işaretlemek, bu
+    butona tıklamanın SADECE bu bölümü yenilemesini sağlıyor — sekme
+    değişmiyor.
+
+    ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi #2): Sidebar'daki
+    "Yapım yılı aralığı" filtresi, tüm sekmelerde görünür olmasına rağmen
+    (Streamlit'te sidebar sayfa geneli bir öğedir, tek bir sekmeye ait
+    değildir) AI önerilerine hiç uygulanmıyordu — kullanıcı haklı olarak
+    "1990-2010 seçtim ama güncel filmler geldi" diye şaşırıyordu. Artık
+    aynı yıl aralığı buraya da geçiriliyor.
+    """
+    st.caption(f"📅 Uygulanan yıl filtresi: {year_range[0]}–{year_range[1]} (sidebar'daki 'Yapım yılı aralığı' ile aynı)")
+
+    # NOT: Öneriler eskiden her sayfa etkileşiminde (ör. Anasayfa'da
+    # filtre değiştirmede) arka planda otomatik hesaplanıyordu — bu,
+    # görünmeden TMDB'ye 4-6 istek atıp tüm uygulamayı yavaşlatıyordu.
+    # Artık sadece kullanıcı butona bastığında hesaplanıyor.
+    st.session_state.setdefault("ai_recommendations", None)
+    st.session_state.setdefault("ai_recommendations_key", None)
+
+    cache_key = (ai_content_type, year_range, tuple(sorted(f.get("id") for f in favorites)))
+    compute_clicked = st.button("🔄 Önerileri Hesapla", type="primary", key="ai_compute_btn")
+
+    if compute_clicked:
+        with st.spinner("Öneriler hesaplanıyor..."):
+            recs = fetch_ai_recommendations(
+                tmdb=tmdb,
+                ml_engine=ml_engine,
+                favorites=favorites,
+                content_type=ai_content_type,
+                year_range=year_range,
+            )
+            st.session_state.ai_recommendations = feedback_manager.filter_pool(recs)
+            st.session_state.ai_recommendations_key = cache_key
+
+    if st.session_state.ai_recommendations_key != cache_key:
+        st.info("Favorilerin, yıl filtren veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
+    elif st.session_state.ai_recommendations is not None:
+        display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, tmdb, show_similarity=True, key_prefix="ai", is_fragment=True)
+
+
+def fetch_ai_recommendations(
+    tmdb: TMDBClient,
+    ml_engine: RecommendationEngine,
+    favorites: list[dict],
+    content_type: str,
+    year_range: tuple[int, int] = (1950, 2100),
+) -> list[dict]:
+    """AI tabanlı öneriler getir."""
+    if not favorites:
+        return []
+
     try:
-        spin_btn = next(b for b in at.button if "Çarkı Çevir" in (b.label or ""))
-        spin_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-
-        share_text_widget = next((i for i in at.text_input if i.key == "share_text_input"), None)
-        assert share_text_widget is None, "'Paylaşım metni' kutusu hâlâ görünüyor, kaldırılmalıydı"
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 14) ÇOK KULLANICILI OTURUM İZOLASYONU TESTLERİ
-# =============================================================================
-
-def test_farkli_oturumlarin_favorileri_karismiyor():
-    """
-    KRİTİK: İki farklı oturum (kullanıcı) kimliğiyle oluşturulan
-    FavoritesManager'lar birbirinin verisini görmemeli/üzerine yazmamalı.
-    Bu, uygulamanın gerçekten birden fazla kullanıcıyla güvenle
-    kullanılabilmesi için şart.
-    """
-    import streamlit as st
-    from utils.favorites_manager import FavoritesManager
-
-    # Bare modda (AppTest dışında) st.session_state süreç genelinde
-    # paylaşıldığı için, önceki testlerden kalıntı olmasın diye başta
-    # da temizliyoruz.
-    st.session_state["favorites"] = []
-
-    fm_a = FavoritesManager(session_id="kullanici_a")
-    fm_a.add({"id": 1, "title": "Kullanici A'nin Filmi", "content_type": "movie"})
-
-    # session_state paylasimli oldugu icin (tek process), ikinci yoneticiyi
-    # olusturmadan once session_state'i sifirlayalim - gercek hayatta bu
-    # farkli tarayicilar/sekmeler oldugu icin dogal olarak ayri olur.
-    st.session_state["favorites"] = []
-
-    fm_b = FavoritesManager(session_id="kullanici_b")
-
-    assert fm_b.get_count() == 0, "Kullanıcı B, kullanıcı A'nın favorisini görmemeli"
-    assert fm_a.FAVORITES_FILE != fm_b.FAVORITES_FILE, "İki oturum aynı dosyayı kullanıyor olamaz"
-
-    fm_b.add({"id": 2, "title": "Kullanici B'nin Filmi", "content_type": "movie"})
-
-    # Dosyalarin gercekten birbirinden bagimsiz oldugunu dogrudan kontrol et
-    import json
-    with open(fm_a.FAVORITES_FILE) as f:
-        data_a = json.load(f)
-    with open(fm_b.FAVORITES_FILE) as f:
-        data_b = json.load(f)
-
-    assert len(data_a) == 1 and data_a[0]["title"] == "Kullanici A'nin Filmi"
-    assert len(data_b) == 1 and data_b[0]["title"] == "Kullanici B'nin Filmi"
-
-
-def test_oturum_kimligi_url_query_paramina_yaziliyor():
-    """
-    Oturum kimliği hem session_state'te hem URL'nin query param'ında
-    tutulmalı — böylece sayfa yenilense (F5) bile aynı veriye dönülebilir.
-    """
-    at, patches = _mocked_app()
-    try:
-        assert len(at.exception) == 0
-        assert "sid" in at.query_params, "Oturum kimliği URL'ye yazılmamış"
-        assert len(at.query_params["sid"]) > 0
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 15) KATI (BİRİNCİL) TÜR FİLTRESİ TESTLERİ
-# =============================================================================
-
-def test_ikincil_tur_olarak_eslesen_icerikler_eleniyor():
-    """
-    'Parazit'/'Moana' senaryosu: bir içeriğin türlerinden biri seçilen türle
-    eşleşse bile, o tür İÇERİĞİN BİRİNCİL (ilk) türü değilse elenmeli.
-    """
-    from unittest.mock import patch as mock_patch
-    from utils.tmdb_client import ResultList
-
-    def fake_discover(**kwargs):
-        r = ResultList()
-        # Komedi (35) ikincil tur olarak geciyor - elenmeli
-        r.append({"id": 1, "title": "Parazit Benzeri", "genre_ids": [18, 53, 35],
-                   "release_date": "2019-01-01", "vote_average": 8.5})
-        r.append({"id": 2, "title": "Moana Benzeri", "genre_ids": [16, 12, 10751, 35],
-                   "release_date": "2016-01-01", "vote_average": 7.6})
-        # Komedi (35) birincil tur - kalmali
-        r.append({"id": 3, "title": "Gercek Komedi", "genre_ids": [35, 10749],
-                   "release_date": "2020-01-01", "vote_average": 6.8})
-        r.total_results = 3
-        return r
-
-    with mock_patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
-         mock_patch.dict(os.environ, {"TMDB_API_KEY": "dummy"}):
-        from utils.tmdb_client import TMDBClient
-        tmdb = TMDBClient()
-        tmdb.discover_movies = lambda **kw: fake_discover(**kw)
-
-        from app import _discover
-        result = _discover(tmdb, [35], [], (0.0, 10.0), (1950, 2026), None, "popularity.desc", "movie", 1)
-
-        assert len(result) == 1
-        assert result[0]["id"] == 3, "Sadece Komedi'nin birincil tür olduğu içerik kalmalıydı"
-
-
-# =============================================================================
-# 16) FİLTRE SEÇİLMEDEN ÇARK/KART GİZLENMESİ TESTLERİ
-# =============================================================================
-
-def test_hicbir_sey_secilmeden_cark_gizli():
-    """Ruh hali/tür modunda hiçbir seçim yapılmadan çark/kart bölümü hiç görünmemeli."""
-    discover_return = make_fake_items()
-    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
-         patch("utils.tmdb_client.TMDBClient.discover_movies", return_value=discover_return), \
-         patch("utils.tmdb_client.TMDBClient.discover_tv_shows", return_value=discover_return):
-        at = AppTest.from_file("app.py")
-        at.run(timeout=30)  # _mocked_app'in aksine burada BİLEREK hiçbir seçim yapmıyoruz
-
-        assert len(at.exception) == 0
-        spin_btn = next((b for b in at.button if "Çarkı Çevir" in (b.label or "")), None)
-        assert spin_btn is None, "Hiçbir şey seçilmeden çark görünmemeliydi"
-
-        info_texts = [i.value for i in at.info]
-        assert any("ruh hali" in (t or "") and "tür" in (t or "") for t in info_texts)
-
-
-def test_ruh_hali_secince_cark_gorunuyor():
-    """Bir ruh hali seçilince çark/kart bölümü görünmeli."""
-    at, patches = _mocked_app()  # _mocked_app zaten varsayılan olarak bir ruh hali seçiyor
-    try:
-        assert len(at.exception) == 0
-        spin_btn = next((b for b in at.button if "Çarkı Çevir" in (b.label or "")), None)
-        assert spin_btn is not None, "Ruh hali seçilince çark görünmeliydi"
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 17) SUPABASE ÖNBELLEK PERFORMANS TESTİ
-# =============================================================================
-
-def test_favorites_manager_supabase_onbellek_calisiyor():
-    """
-    KRİTİK: FavoritesManager artık veriyi `st.session_state`'te tuttuğu
-    için, aynı tarayıcı oturumunda birden fazla FavoritesManager ÖRNEĞİ
-    oluşturulsa bile (her yeniden yüklemede olduğu gibi), Supabase'e
-    SADECE BİR KEZ gidilmeli — sonraki tüm örnekler zaten yüklenmiş
-    veriyi bellekten kullanmalı.
-    """
-    import streamlit as st
-    from unittest.mock import patch as mock_patch
-
-    call_count = {"n": 0}
-
-    class FakeResp:
-        def __init__(self, data):
-            self.data = data
-
-    class FakeQuery:
-        def __init__(self, storage):
-            self.storage = storage
-            self._filters = {}
-
-        def select(self, cols):
-            return self
-
-        def eq(self, col, val):
-            self._filters[col] = val
-            return self
-
-        def order(self, *a, **kw):
-            return self
-
-        def execute(self):
-            call_count["n"] += 1
-            rows = [r for r in self.storage if all(r.get(k) == v for k, v in self._filters.items())]
-            return FakeResp(rows)
-
-    class FakeTable:
-        def __init__(self, storage):
-            self.storage = storage
-
-        def select(self, cols):
-            return FakeQuery(self.storage)
-
-    class FakeClient:
-        def __init__(self):
-            self._tables = {"favorites": [{"session_id": "x", "content_id": 1, "content": {"id": 1}}]}
-
-        def table(self, name):
-            return FakeTable(self._tables[name])
-
-    fake_client = FakeClient()
-
-    # Bare modda session_state onceki testlerden kalinti tutabiliyor,
-    # bu yuzden ilgili anahtarlari once temizliyoruz.
-    st.session_state["favorites"] = []
-    st.session_state["favorites_loaded_from_backend"] = False
-
-    with mock_patch("utils.favorites_manager._get_supabase_client", return_value=fake_client):
-        from utils.favorites_manager import FavoritesManager
-
-        # 20 kartlik bir liste render edilirken her karti YENI bir
-        # FavoritesManager orneginin kontrol ettigini simule ediyoruz
-        # (gercekte her rerun'da init_favorites_manager() yeni bir ornek
-        # yaratir).
-        for i in range(20):
-            fm = FavoritesManager(session_id="x")
-            fm.is_favorite(i)
-
-        assert call_count["n"] == 1, f"Önbellek çalışmıyor: 20 örnek için {call_count['n']} ağ isteği atıldı"
-
-
-# =============================================================================
-# 18) LİSTE KARTLARINDA AÇIKLAMA VE FRAGMAN TESTLERİ
-# =============================================================================
-
-def test_liste_kartinda_aciklama_gorunuyor():
-    """Sonuç listesindeki kartlarda film açıklaması (overview) görünmeli."""
-    items_with_overview = make_fake_items()
-    for item in items_with_overview:
-        item["overview"] = "Bu gerçekten uzun ve detaylı bir film açıklamasıdır, test amaçlıdır ve 160 karakteri aşabilir belki de aşmaz ama önemli değil."
-
-    at, patches = _mocked_app(discover_return=items_with_overview)
-    try:
-        caption_texts = [c.value for c in at.caption]
-        assert any("uzun ve detaylı bir film açıklaması" in (t or "") for t in caption_texts)
-    finally:
-        _stop_patches(patches)
-
-
-def test_liste_kartinda_fragman_sadece_istenince_cekiliyor():
-    """
-    Fragman, kart listesinde otomatik çekilmemeli — sadece kullanıcı
-    'Fragmanı Yükle' butonuna basınca TMDB'ye istek atılmalı (aksi halde
-    20 kartlık bir listede 20 gereksiz istek atılırdı).
-    """
-    trailer_call_count = {"n": 0}
-
-    def fake_trailer_key(*a, **kw):
-        trailer_call_count["n"] += 1
-        return "dQw4w9WgXcQ"
-
-    at, patches = _mocked_app()
-    try:
-        with patch("utils.tmdb_client.TMDBClient.get_trailer_key", side_effect=fake_trailer_key):
-            # Sayfa ilk acildiginda hicbir fragman istegi atilmamis olmali
-            assert trailer_call_count["n"] == 0, "Fragman otomatik cekilmemeliydi"
-
-            load_btn = next((b for b in at.button if (b.key or "").startswith("load_trailer_")), None)
-            assert load_btn is not None, "'Fragmanı Yükle' butonu bulunamadı"
-            load_btn.click().run(timeout=30)
-
-            assert trailer_call_count["n"] == 1, "Butona basinca tam olarak 1 istek atilmali"
-            assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 19) FAVORİ KALICILIĞI SAĞLAMLIK TESTLERİ (LinkedIn geri bildirimi #1)
-# =============================================================================
-
-def test_supabase_okuma_hatasinda_tekrar_denenir():
-    """
-    KRİTİK (gerçek kullanıcı şikayeti): Supabase okuması geçici olarak
-    başarısız olursa, uygulama bunu 'yüklendi, favori yok' olarak
-    YANLIŞLIKLA işaretlememeli — bir sonraki denemede tekrar okumayı
-    denemeli, aksi halde kullanıcı o oturum boyunca (ve her yeni girişte)
-    favorilerini hiç göremez.
-    """
-    import streamlit as st
-    from unittest.mock import patch as mock_patch
-
-    call_count = {"n": 0}
-
-    class FailingThenWorkingTable:
-        def __init__(self):
-            self._filters = {}
-
-        def select(self, cols):
-            return self
-
-        def eq(self, col, val):
-            self._filters[col] = val
-            return self
-
-        def order(self, *a, **kw):
-            return self
-
-        def execute(self):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                raise ConnectionError("Geçici ağ hatası (simüle)")
-            class Resp:
-                data = [{"content": {"id": 1, "title": "Kurtarilan Film"}}]
-            return Resp()
-
-    class FakeClient:
-        def table(self, name):
-            return FailingThenWorkingTable()
-
-    st.session_state["favorites"] = []
-    st.session_state["favorites_loaded_from_backend"] = False
-
-    with mock_patch("utils.favorites_manager._get_supabase_client", return_value=FakeClient()):
-        from utils.favorites_manager import FavoritesManager
-        fm = FavoritesManager(session_id="retry_test")
-
-        result = fm.get_all()
-        assert call_count["n"] == 2, "İlk deneme başarısız olunca otomatik ikinci deneme yapılmalıydı"
-        assert len(result) == 1 and result[0]["title"] == "Kurtarilan Film"
-
-
-def test_supabase_iki_deneme_de_basarisizsa_gorunur_uyari_var():
-    """İki deneme de başarısız olursa kullanıcıya görünür bir uyarı gösterilmeli, sessizce boş geçilmemeli."""
-    import streamlit as st
-    from unittest.mock import patch as mock_patch
-
-    class AlwaysFailingTable:
-        def select(self, cols):
-            return self
-
-        def eq(self, col, val):
-            return self
-
-        def order(self, *a, **kw):
-            return self
-
-        def execute(self):
-            raise ConnectionError("Kalıcı hata (simüle)")
-
-    class FakeClient:
-        def table(self, name):
-            return AlwaysFailingTable()
-
-    st.session_state["favorites"] = []
-    st.session_state["favorites_loaded_from_backend"] = False
-
-    with mock_patch("utils.favorites_manager._get_supabase_client", return_value=FakeClient()):
-        from utils.favorites_manager import FavoritesManager
-        fm = FavoritesManager(session_id="fail_test")
-        result = fm.get_all()
-
-        assert result == []
-        # LOADED_FLAG işaretlenmemiş olmalı ki bir sonraki denemede tekrar denensin
-        assert st.session_state["favorites_loaded_from_backend"] is False
-
-
-# =============================================================================
-# 20) AI ÖNERİ TÜR HEDEFLEME TESTLERİ (LinkedIn geri bildirimi #2)
-# =============================================================================
-
-def test_favorilerden_en_sik_turler_dogru_cikariliyor():
-    """
-    KRİTİK (gerçek kullanıcı şikayeti): '4 Macera + 1 Romantik favoriledim
-    ama alakasız öneriler geldi' — çünkü aday havuzu hiç tür bazlı
-    filtrelenmiyordu. Şimdi favorilerden en sık türler doğru çıkarılmalı.
-    """
-    from app import _get_top_genres_from_favorites
-
-    favorites = [
-        {"id": 1, "content_type": "movie", "genre_ids": [12, 28]},   # Macera, Aksiyon
-        {"id": 2, "content_type": "movie", "genre_ids": [12]},        # Macera
-        {"id": 3, "content_type": "movie", "genre_ids": [12, 14]},   # Macera, Fantastik
-        {"id": 4, "content_type": "movie", "genre_ids": [12]},        # Macera
-        {"id": 5, "content_type": "movie", "genre_ids": [10749]},     # Romantik
-        {"id": 6, "content_type": "tv", "genre_ids": [35]},           # Komedi ama dizi - dahil edilmemeli
-    ]
-
-    top_genres = _get_top_genres_from_favorites(favorites, content_type="movie", top_n=2)
-    assert 12 in top_genres, "Macera (en sık geçen tür) listede olmalıydı"
-    assert 35 not in top_genres, "Dizi favorisinin türü, film önerileri için karışmamalı"
-
-
-def test_ai_onerileri_favori_turlere_gore_filtreleniyor():
-    """
-    Aday havuzu artık kullanıcının favori türlerine göre de (genel
-    popüler içeriğe ek olarak) TMDB'den özel olarak çekilmeli.
-    """
-    from unittest.mock import patch as mock_patch, MagicMock
-
-    discover_calls_with_genre = []
-
-    def fake_discover_movies(**kwargs):
-        if kwargs.get("genre_ids"):
-            discover_calls_with_genre.append(kwargs["genre_ids"])
-        return make_fake_items(n=3)
-
-    at, patches = _mocked_app()
-    try:
-        with mock_patch("utils.tmdb_client.TMDBClient.discover_movies", side_effect=fake_discover_movies), \
-             mock_patch("utils.tmdb_client.TMDBClient.get_popular_movies", return_value=make_fake_items(n=3)):
-            fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
-            fav_btn.click().run(timeout=30)
-
-            compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
-            assert compute_btn is not None
-            compute_btn.click().run(timeout=30)
-
-            assert len(at.exception) == 0
-            assert len(discover_calls_with_genre) > 0, "Favori türlere göre filtrelenmiş bir TMDB isteği hiç atılmadı"
-    finally:
-        _stop_patches(patches)
-
-
-# =============================================================================
-# 21) URL FİLTRE HATIRLAMA TESTLERİ (LinkedIn geri bildirimi #3)
-# =============================================================================
-
-def test_filtre_secimleri_urle_yaziliyor():
-    """Bir ruh hali/tür seçildiğinde, bu seçim URL query param'larına yazılmalı."""
-    at, patches = _mocked_app()
-    try:
-        mode_val = at.query_params.get("mode")
-        moods_val = at.query_params.get("moods")
-        # AppTest bazı durumlarda query param degerini liste olarak dondurebiliyor
-        mode_val = mode_val[0] if isinstance(mode_val, list) else mode_val
-        moods_val = moods_val[0] if isinstance(moods_val, list) else moods_val
-        assert mode_val == "mood"
-        assert moods_val == "aglamalik"
-    finally:
-        _stop_patches(patches)
-
-
-def test_url_parametresinden_filtre_geri_yukleniyor():
-    """
-    Sayfa, URL'de zaten `mode` ve `moods`/`genres` parametreleri varken
-    açılırsa, o filtre seçimini otomatik olarak geri yüklemeli.
-    """
-    discover_return = make_fake_items()
-    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
-         patch("utils.tmdb_client.TMDBClient.discover_movies", return_value=discover_return), \
-         patch("utils.tmdb_client.TMDBClient.discover_tv_shows", return_value=discover_return):
-        at = AppTest.from_file("app.py")
-        at.query_params["mode"] = "genre"
-        at.query_params["genres"] = "komedi"
-        at.run(timeout=30)
-
-        assert len(at.exception) == 0
-        radio = at.sidebar.radio(key="filter_mode")
-        assert radio.value == "genre", "URL'deki mod geri yüklenmedi"
-
-        genre_widget = next((m for m in at.multiselect if m.key == "genre_multiselect"), None)
-        assert genre_widget is not None
-        assert "komedi" in genre_widget.value, "URL'deki tür seçimi geri yüklenmedi"
-
-
-# =============================================================================
-# 22) TÜR GENİŞLETME SANITY TESTİ
-# =============================================================================
-
-def test_ai_onerileri_4_tur_ile_calisiyor_hatasiz():
-    """Tür sayısı 2'den 4'e genişletildikten sonra AI önerileri hâlâ hatasız hesaplanabilmeli."""
-    at, patches = _mocked_app()
-    try:
-        fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
-        fav_btn.click().run(timeout=30)
-
-        compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
-        compute_btn.click().run(timeout=30)
-        assert len(at.exception) == 0
-    finally:
-        _stop_patches(patches)
-
-
-def test_ai_onerileri_5_altindaki_puanlari_eliyor():
-    """AI önerileri aday havuzu, 5.0'ın altındaki puanlı içerikleri hiç dikkate almamalı."""
-    low_and_high_rated = [
-        {"id": 1, "title": "Dusuk Puanli", "vote_average": 3.2, "overview": "x", "poster_url": None,
-         "release_date": "2020-01-01", "content_type": "movie", "popularity": 1, "genre_ids": [18]},
-        {"id": 2, "title": "Yuksek Puanli", "vote_average": 7.8, "overview": "x", "poster_url": None,
-         "release_date": "2020-01-01", "content_type": "movie", "popularity": 1, "genre_ids": [18]},
-    ]
-    at, patches = _mocked_app()
-    try:
-        with patch("utils.tmdb_client.TMDBClient.get_popular_movies", return_value=low_and_high_rated), \
-             patch("utils.tmdb_client.TMDBClient.discover_movies", return_value=low_and_high_rated):
-            fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
-            fav_btn.click().run(timeout=30)
-
-            compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
-            compute_btn.click().run(timeout=30)
-            assert len(at.exception) == 0
-
-            rec_titles = [r.get("title") for r in st_session_state_ai_recs(at)]
-            assert "Dusuk Puanli" not in rec_titles
-    finally:
-        _stop_patches(patches)
-
-
-def st_session_state_ai_recs(at):
-    try:
-        return at.session_state["ai_recommendations"] or []
-    except Exception:
+        candidate_pool = []
+
+        # ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi): Önceki
+        # sürümde aday havuzu SADECE genel "popüler" ve "yüksek puanlı"
+        # içerikten geliyordu, kullanıcının favori TÜRLERİNE göre hiç
+        # filtrelenmiyordu — bu yüzden "4 Macera + 1 Romantik favoriledim
+        # ama önerilerde alakasız şeyler çıktı" gibi şikayetler oluyordu.
+        # Artık kullanıcının en sık favorilediği türlere göre de özel bir
+        # aday grubu ekliyoruz. top_n=4 (eskiden 2) — favori zevklerin daha
+        # çeşitliyse (ör. 3-4 farklı tür), bu çeşitliliği daha iyi yansıtır.
+        top_genres = _get_top_genres_from_favorites(favorites, content_type, top_n=4)
+        year_from, year_to = year_range
+
+        if content_type == "movie":
+            if top_genres:
+                candidate_pool.extend(tmdb.discover_movies(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
+                    page=1,
+                ))
+                candidate_pool.extend(tmdb.discover_movies(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
+                    page=2,
+                ))
+            candidate_pool.extend(tmdb.get_popular_movies(page=1))
+            candidate_pool.extend(tmdb.get_popular_movies(page=2))
+            candidate_pool.extend(tmdb.discover_movies(
+                min_vote_average=7.5,
+                min_vote_count=1000,
+                year_from=year_from,
+                year_to=year_to,
+                page=1,
+            ))
+        else:
+            if top_genres:
+                candidate_pool.extend(tmdb.discover_tv_shows(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
+                    page=1,
+                ))
+                candidate_pool.extend(tmdb.discover_tv_shows(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    year_from=year_from,
+                    year_to=year_to,
+                    page=2,
+                ))
+            candidate_pool.extend(tmdb.get_popular_tv_shows(page=1))
+            candidate_pool.extend(tmdb.get_popular_tv_shows(page=2))
+            candidate_pool.extend(tmdb.discover_tv_shows(
+                min_vote_average=7.5,
+                min_vote_count=500,
+                page=1,
+            ))
+
+        seen_ids = set()
+        unique_pool = []
+        for item in candidate_pool:
+            if item.get("id") not in seen_ids:
+                seen_ids.add(item.get("id"))
+                unique_pool.append(item)
+
+        # Kullanıcı isteği: AI önerilerinde sadece 5.0 ve üzeri puanlı
+        # içerikler bulunsun. "Popüler" havuzu TMDB'de puana göre
+        # filtrelenmediği için (sadece popülerliğe göre sıralı), bunu
+        # burada kendimiz garanti altına alıyoruz.
+        unique_pool = [item for item in unique_pool if (item.get("vote_average") or 0) >= 5.0]
+
+        # Yıl filtresi de son bir kez istemci tarafında garanti altına
+        # alınıyor — "popüler" havuz TMDB'de yıl parametresi desteklemediği
+        # için (sadece popülerliğe göre sıralı), oradan gelen içerikler
+        # yıl aralığı dışında kalabiliyordu.
+        def _in_year_range(item: dict) -> bool:
+            date_str = item.get("release_date") or ""
+            try:
+                year = int(date_str[:4])
+            except (ValueError, TypeError):
+                return False
+            return year_from <= year <= year_to
+
+        unique_pool = [item for item in unique_pool if _in_year_range(item)]
+
+        recommendations = ml_engine.get_recommendations(
+            favorites=favorites,
+            candidate_pool=unique_pool,
+            top_n=12,
+        )
+
+        # ML motoru aynı içeriği (farklı favorilerle eşleştiği için) birden
+        # fazla kez döndürebiliyor. Aşağıdaki `_render_content_card_body`
+        # her karta content_id + başlığa dayalı bir buton anahtarı (key)
+        # üretiyor; aynı id iki kez gelirse Streamlit
+        # `StreamlitDuplicateElementKey` hatası fırlatır. Burada id'ye göre
+        # tekilleştiriyoruz.
+        seen_rec_ids = set()
+        unique_recommendations = []
+        for rec in recommendations:
+            rec_id = rec.get("id")
+            if rec_id not in seen_rec_ids:
+                seen_rec_ids.add(rec_id)
+                unique_recommendations.append(rec)
+
+        return unique_recommendations
+    except Exception as e:
+        st.error(f"AI önerileri hesaplanırken hata: {e}")
         return []
 
 
+# =============================================================================
+# GÖRÜNTÜLEME
+# =============================================================================
+
+def _rerun_scoped(is_fragment: bool = False) -> None:
+    """
+    NOT (önemli): `st.rerun(scope="fragment")` denemesi, elimizdeki
+    Streamlit sürümünde (1.60.0) bu kullanım şeklinde güvenilir çalışmadı
+    — "scope=fragment can only be specified... during fragment reruns"
+    hatası veriyordu, önceki sürümde bu hata bir try/except ile
+    SESSİZCE yutuluyor ve fark edilmeden her seferinde tam sayfa
+    yenilemeye düşülüyordu. Bunu artık gizlemiyoruz: `is_fragment`
+    parametresi şu an için sadece belgeleme amaçlı tutuluyor, gerçek
+    davranış her zaman normal (tüm sayfa) yeniden çalıştırmadır.
+    """
+    st.rerun()
+
+
+def _render_content_card_body(
+    content: dict,
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
+    show_similarity: bool,
+    idx: int = 0,
+    key_prefix: str = "grid",
+    is_fragment: bool = False,
+) -> None:
+    """Bir içerik kartının gövdesini render eder (context manager'dan bağımsız)."""
+    poster_url = content.get("poster_url") or TMDBClient.PLACEHOLDER_POSTER
+    st.image(poster_url, width="stretch")
+
+    title = content.get("title", "Bilinmiyor")
+    st.markdown(f"**{title}**")
+
+    vote_avg = content.get("vote_average", 0)
+    release_date = content.get("release_date", "")
+    year = release_date[:4] if release_date else "—"
+
+    if vote_avg >= 8.0:
+        rating_display = f"🌟 {vote_avg:.1f}"
+    elif vote_avg >= 7.0:
+        rating_display = f"⭐ {vote_avg:.1f}"
+    else:
+        rating_display = f"✨ {vote_avg:.1f}"
+
+    st.caption(f"{rating_display} | 📅 {year}")
+
+    # Açıklama (TMDB'den zaten geldiği için ek bir istek gerektirmiyor)
+    overview = (content.get("overview") or "").strip()
+    if overview:
+        snippet = overview if len(overview) <= 160 else overview[:160].rsplit(" ", 1)[0] + "…"
+        st.caption(snippet)
+
+    if show_similarity and "similarity_score" in content:
+        score = content["similarity_score"]
+        st.caption(f"🎯 Benzerlik: %{score * 100:.0f}")
+
+    content_id = content.get("id")
+
+    # Fragman: TMDB isteği gerektirdiği için, tüm kartlar için otomatik
+    # değil, sadece kullanıcı gerçekten istediğinde (butona basınca) çekilir
+    # — yoksa 20 kartlık bir listede 20 gereksiz istek atılırdı.
+    trailer_flag_key = f"trailer_wanted_{key_prefix}_{idx}_{content_id}"
+    with st.expander("🎬 Fragman"):
+        if st.session_state.get(trailer_flag_key):
+            try:
+                trailer_key = tmdb.get_trailer_key(content_id, content.get("content_type", "movie"))
+            except Exception:
+                trailer_key = None
+            if trailer_key:
+                st.video(f"https://www.youtube.com/watch?v={trailer_key}")
+                st.caption(f"Açılmazsa: [YouTube'da aç](https://www.youtube.com/watch?v={trailer_key})")
+            else:
+                st.caption("Bu içerik için fragman bulunamadı.")
+        else:
+            if st.button("Fragmanı Yükle", key=f"load_trailer_{key_prefix}_{idx}_{content_id}", width="stretch"):
+                st.session_state[trailer_flag_key] = True
+                st.rerun()
+
+    is_fav = fav_manager.is_favorite(content_id)
+
+    btn_label = "❤️ Favorilerde" if is_fav else "🤍 Favorilere Ekle"
+    btn_key = f"fav_{key_prefix}_{idx}_{content_id}"
+
+    if st.button(btn_label, key=btn_key, width="stretch"):
+        is_now_fav, message = fav_manager.toggle(content)
+        st.toast(f"{'❤️' if is_now_fav else '💔'} {message}: {title}")
+        _rerun_scoped(is_fragment=is_fragment)
+
+    if feedback_manager.is_watched(content_id):
+        st.success("Beğendin", icon="✅")
+    elif feedback_manager.is_disliked(content_id):
+        st.warning("Beğenmedin", icon="🚫")
+    else:
+        fb_col1, fb_col2 = st.columns(2)
+        with fb_col1:
+            if st.button("✅ Beğendim", key=f"watched_{key_prefix}_{idx}_{content_id}", width="stretch"):
+                feedback_manager.mark_watched(content)
+                st.toast(f"✅ '{title}' beğendiğin olarak kaydedildi.")
+                _rerun_scoped(is_fragment=is_fragment)
+        with fb_col2:
+            if st.button("🚫 Beğenmedim", key=f"disliked_{key_prefix}_{idx}_{content_id}", width="stretch"):
+                feedback_manager.mark_disliked(content)
+                if is_fav:
+                    fav_manager.remove(content_id)
+                st.toast(f"🚫 '{title}' bir daha önerilmeyecek.")
+                _rerun_scoped(is_fragment=is_fragment)
+
+
+
+def display_content_card(
+    content: dict,
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
+    show_similarity: bool = False,
+    col=None,
+    idx: int = 0,
+    key_prefix: str = "grid",
+    is_fragment: bool = False,
+) -> None:
+    """
+    Tek bir içerik kartı göster.
+
+    NOT: Önceki sürümde `col` parametresi hiçbir zaman fonksiyona
+    geçirilmiyordu, bu yüzden `container = col if col else st` satırı
+    Streamlit modülünün kendisini bir context manager gibi kullanmaya
+    çalışıyor ve `TypeError: 'module' object does not support the
+    context manager protocol` hatası veriyordu. Artık `col` gerçekten
+    geçirildiğinde onunla, geçirilmediğinde (çağıran zaten kendi
+    `with cols[i]:` bloğunun içindeyse) doğrudan render ederek bu
+    sorunu çözüyoruz.
+    """
+    if col is not None:
+        with col:
+            _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix, is_fragment=is_fragment)
+    else:
+        _render_content_card_body(content, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix, is_fragment=is_fragment)
+
+
+def display_content_grid(
+    items: list[dict],
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
+    show_similarity: bool = False,
+    key_prefix: str = "grid",
+    is_fragment: bool = False,
+) -> None:
+    """
+    İçerik grid'i göster.
+
+    `is_fragment`: Bu fonksiyonun bir @st.fragment içinden çağrılıp
+    çağrılmadığını KESİN olarak belirtir (çağıran taraf bilir). Buna göre,
+    kartlardaki favori/beğendim/beğenmedim butonları sadece bu bölümü mü
+    (fragment), yoksa tüm sayfayı mı yenileyeceğine karar verir.
+    """
+    if not items:
+        st.warning("🔍 Bu kriterlere uygun içerik bulunamadı.")
+        return
+
+    st.caption("🌟 = 8+ puan · ⭐ = 7-7.9 puan · ✨ = 7'nin altı")
+
+    cols = st.columns(3)
+
+    for idx, item in enumerate(items):
+        with cols[idx % 3]:
+            _render_content_card_body(item, fav_manager, feedback_manager, tmdb, show_similarity, idx=idx, key_prefix=key_prefix, is_fragment=is_fragment)
+            st.divider()
+
+
+def display_favorites_page(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_manager: FeedbackManager) -> None:
+    """Favoriler sayfasını göster."""
+    st.header("❤️ Favorilerim")
+
+    # ---- ARAMA: favorileri sıfırdan oluşturabilmek için ----
+    st.markdown('<div class="section-title">🔍 Film / Dizi Ara</div>', unsafe_allow_html=True)
+    st.caption("Aklındaki filmi doğrudan ara, favorilere ekle — filtrelerden geçmene gerek yok.")
+
+    s_col1, s_col2, s_col3 = st.columns([3, 1.2, 1])
+    with s_col1:
+        search_query = st.text_input(
+            "Ara", key="fav_search_query", label_visibility="collapsed",
+            placeholder="Film veya dizi adı yaz...",
+        )
+    with s_col2:
+        search_type = st.selectbox(
+            "Tür", options=["movie", "tv"], key="fav_search_type", label_visibility="collapsed",
+            format_func=lambda x: "🎥 Film" if x == "movie" else "📺 Dizi",
+        )
+    with s_col3:
+        search_clicked = st.button("🔍 Ara", key="fav_search_btn", width="stretch", type="primary")
+
+    st.session_state.setdefault("fav_search_results", None)
+    st.session_state.setdefault("fav_search_query_done", "")
+
+    if search_clicked and search_query.strip():
+        with st.spinner("Aranıyor..."):
+            if search_type == "movie":
+                results = tmdb.search_movies(search_query.strip())
+            else:
+                results = tmdb.search_tv_shows(search_query.strip())
+        st.session_state["fav_search_results"] = results
+        st.session_state["fav_search_query_done"] = search_query.strip()
+
+    if st.session_state["fav_search_results"] is not None:
+        results = st.session_state["fav_search_results"]
+        if results:
+            st.caption(f"'{st.session_state['fav_search_query_done']}' için {len(results)} sonuç bulundu.")
+            display_content_grid(results[:12], fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="favsearch", is_fragment=False)
+        else:
+            st.warning(f"'{st.session_state['fav_search_query_done']}' için sonuç bulunamadı.")
+
+    st.divider()
+
+    favorites = fav_manager.get_all()
+
+    if not favorites:
+        st.info(
+            "📭 Henüz favori eklememişsin.\n\n"
+            "Yukarıdan arama yaparak ya da film/dizileri keşfederken **'Favorilere Ekle'** "
+            "butonuna tıklayarak listeni oluşturabilirsin!"
+        )
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Toplam Favori", len(favorites))
+    with col2:
+        movies = [f for f in favorites if f.get("content_type") == "movie"]
+        st.metric("Film", len(movies))
+    with col3:
+        shows = [f for f in favorites if f.get("content_type") == "tv"]
+        st.metric("Dizi", len(shows))
+
+    st.caption("💡 İpucu: Anasayfa'daki filtre panelinden **'❤️ Favorilerimden'** modunu seçerek çarkı veya kart destesini doğrudan bu listeden çalıştırabilirsin.")
+
+    st.divider()
+
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🗑️ Tümünü Temizle", type="secondary"):
+            fav_manager.clear_all()
+            st.toast("Tüm favoriler temizlendi!")
+            st.rerun()
+
+    cols = st.columns(3)
+    for idx, fav in enumerate(favorites):
+        with cols[idx % 3]:
+            poster_url = fav.get("poster_url") or fav.get("poster_path")
+            if poster_url and not poster_url.startswith("http"):
+                poster_url = f"https://image.tmdb.org/t/p/w342{poster_url}"
+
+            if poster_url:
+                st.image(poster_url, width="stretch")
+
+            st.markdown(f"**{fav.get('title', 'Bilinmiyor')}**")
+
+            vote_avg = fav.get("vote_average", 0)
+            content_type = "🎬 Film" if fav.get("content_type") == "movie" else "📺 Dizi"
+            st.caption(f"⭐ {vote_avg:.1f} | {content_type}")
+
+            if st.button("💔 Kaldır", key=f"remove_{idx}_{fav.get('id')}"):
+                fav_manager.remove(fav.get("id"))
+                st.toast(f"💔 {fav.get('title')} favorilerden kaldırıldı!")
+                st.rerun()
+
+            st.divider()
+
+
+def display_feedback_page(fav_manager: FavoritesManager, feedback_manager: FeedbackManager) -> None:
+    """Beğendiğim / Beğenmediğim listelerini gösterir, geri alma imkanı sunar."""
+    st.header("👍👎 Beğendiklerim / Beğenmediklerim")
+    st.caption(
+        "Beğendiğin içerikler çarkta/listede görünmeye devam eder — sadece "
+        "beğenmediklerin gizlenir. Fikrini değiştirirsen buradan geri alabilirsin."
+    )
+
+    liked_tab, disliked_tab = st.tabs(["✅ Beğendiklerim", "🚫 Beğenmediklerim"])
+
+    with liked_tab:
+        liked_items = feedback_manager.get_watched_list()
+        if not liked_items:
+            st.info("📭 Henüz hiçbir şeyi 'Beğendim' olarak işaretlemedin.")
+        else:
+            st.caption(f"{len(liked_items)} içerik")
+            cols = st.columns(3)
+            for idx, item in enumerate(liked_items):
+                with cols[idx % 3]:
+                    st.markdown(f"**{item.get('title', 'Bilinmiyor')}**")
+                    content_label = "🎬 Film" if item.get("content_type") == "movie" else "📺 Dizi"
+                    st.caption(content_label)
+                    if st.button("↩️ Geri Al", key=f"undo_watched_{idx}_{item.get('id')}", width="stretch"):
+                        feedback_manager.unmark(item.get("id"))
+                        st.toast(f"↩️ '{item.get('title')}' için işaret geri alındı.")
+                        st.rerun()
+                    st.divider()
+
+    with disliked_tab:
+        disliked_items = feedback_manager.get_disliked_list()
+        if not disliked_items:
+            st.info("📭 Henüz hiçbir şeyi 'Beğenmedim' olarak işaretlemedin.")
+        else:
+            st.caption(f"{len(disliked_items)} içerik — bunlar çarkta/listede/AI önerilerinde gizleniyor.")
+            cols = st.columns(3)
+            for idx, item in enumerate(disliked_items):
+                with cols[idx % 3]:
+                    st.markdown(f"**{item.get('title', 'Bilinmiyor')}**")
+                    content_label = "🎬 Film" if item.get("content_type") == "movie" else "📺 Dizi"
+                    st.caption(content_label)
+                    if st.button("↩️ Geri Al", key=f"undo_disliked_{idx}_{item.get('id')}", width="stretch"):
+                        feedback_manager.unmark(item.get("id"))
+                        st.toast(f"↩️ '{item.get('title')}' tekrar gösterilecek.")
+                        st.rerun()
+                    st.divider()
+
+
+# =============================================================================
+# ANA SAYFA (ÇARK + TEK FİLTRE PANELİ)
+# =============================================================================
+
+@st.dialog("🎉 Seçilen Film", width="small")
+def _show_winner_dialog(
+    winner: dict,
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    tmdb: TMDBClient,
+    mode: str = "wheel",
+) -> None:
+    """Kazanan içeriği ekranın tam ortasında bir modal pencerede göster."""
+    st.image(winner.get("poster_url") or TMDBClient.PLACEHOLDER_POSTER, width="stretch")
+    st.markdown(f"### {winner.get('title', 'Bilinmiyor')}")
+    st.markdown(f"⭐ **Puan:** {winner.get('vote_average', 0):.1f}")
+    st.markdown(f"📝 {(winner.get('overview') or 'Açıklama yok.')[:280]}...")
+
+    # Nerede izlenir — sadece burada, tek bir içerik için sorgulanıyor
+    # (tüm havuz için sorgulamak gereksiz yere çok fazla istek atardı).
+    try:
+        providers = tmdb.get_watch_providers(winner.get("id"), winner.get("content_type", "movie"))
+    except Exception:
+        providers = {"flatrate": [], "rent": [], "buy": []}
+
+    flatrate = providers.get("flatrate", [])
+    if flatrate:
+        st.caption("📺 Nerede izlenir: " + ", ".join(flatrate))
+    elif providers.get("rent") or providers.get("buy"):
+        options = providers.get("rent", []) + providers.get("buy", [])
+        st.caption("💰 Kiralama/satın alma: " + ", ".join(sorted(set(options))))
+    else:
+        st.caption("📺 Bu içerik için Türkiye'de platform bilgisi bulunamadı.")
+
+    try:
+        trailer_key = tmdb.get_trailer_key(winner.get("id"), winner.get("content_type", "movie"))
+    except Exception:
+        trailer_key = None
+
+    if trailer_key:
+        with st.expander("🎬 Fragmanı İzle"):
+            st.video(f"https://www.youtube.com/watch?v={trailer_key}")
+            st.caption(f"Gömülü oynatıcı çalışmazsa (bazı Google hesabı/ağ kısıtlamalarında olabiliyor): [YouTube'da aç](https://www.youtube.com/watch?v={trailer_key})")
+
+    with st.expander("📤 Paylaş"):
+        cta_text = "Çarkı sen de çevir!" if mode == "wheel" else "Sen de bir kart çek!"
+        share_image = generate_share_card(winner, cta_text=cta_text)
+        clapper_emoji = "\U0001F3AC"  # 🎬 — dosya kodlaması bozulmalarına karşı Unicode kaçış kodu kullanıyoruz
+        share_caption = f"Bana bu film çıktı! {clapper_emoji} {winner.get('title', 'Bilinmiyor')}"
+
+        if share_image:
+            st.image(share_image, width="stretch")
+
+            # Native paylaşım: tarayıcı destekliyorsa (çoğunlukla mobil
+            # Chrome/Safari) gerçek görseli doğrudan WhatsApp/Instagram gibi
+            # uygulamalara "resim" olarak gönderir — link değil, dosyanın
+            # kendisi. Masaüstü tarayıcılarda genelde desteklenmez, bu durumda
+            # aşağıdaki "İndir" butonuyla elle paylaşmak gerekir.
+            image_b64 = base64.b64encode(share_image).decode("utf-8")
+            share_caption_js = json.dumps(share_caption)
+            st.iframe(
+                f"""
+                <div style="font-family: -apple-system, sans-serif;">
+                <button id="native-share-btn" style="
+                    width: 100%; padding: 10px; border-radius: 8px;
+                    background: #e50914; color: white; border: none;
+                    font-size: 14px; font-weight: 600; cursor: pointer;
+                ">📱 Görseli Doğrudan Paylaş (WhatsApp/Instagram vb.)</button>
+                <p id="native-share-fallback" style="display:none; color:#999; font-size:12px; margin-top:8px;">
+                    Bu tarayıcı doğrudan resim paylaşımını desteklemiyor — lütfen aşağıdaki "İndir" butonunu kullan.
+                </p>
+                <script>
+                document.getElementById('native-share-btn').addEventListener('click', async () => {{
+                    try {{
+                        const byteCharacters = atob("{image_b64}");
+                        const byteNumbers = new Array(byteCharacters.length);
+                        for (let i = 0; i < byteCharacters.length; i++) {{
+                            byteNumbers[i] = byteCharacters.charCodeAt(i);
+                        }}
+                        const byteArray = new Uint8Array(byteNumbers);
+                        const file = new File([byteArray], "cineroulette.png", {{ type: "image/png" }});
+
+                        if (navigator.canShare && navigator.canShare({{ files: [file] }})) {{
+                            await navigator.share({{ files: [file], text: {share_caption_js} }});
+                        }} else {{
+                            document.getElementById('native-share-fallback').style.display = 'block';
+                        }}
+                    }} catch (e) {{
+                        document.getElementById('native-share-fallback').style.display = 'block';
+                    }}
+                }});
+                </script>
+                </div>
+                """,
+                height=70,
+            )
+
+            safe_title = "".join(c for c in winner.get("title", "film") if c.isalnum() or c in " _-").strip() or "film"
+            st.download_button(
+                "📥 Görseli İndir",
+                data=share_image,
+                file_name=f"{safe_title}_cineroulette.png",
+                mime="image/png",
+                key="download_share_card",
+                width="stretch",
+            )
+        else:
+            st.caption("Paylaşım görseli oluşturulamadı.")
+
+    is_fav = fav_manager.is_favorite(winner.get("id"))
+    btn_text = "❤️ Zaten Favorilerde" if is_fav else "❤️ Favorilere Ekle"
+    if st.button(btn_text, key="dialog_wheel_result_fav", width="stretch"):
+        if not is_fav:
+            fav_manager.add(winner)
+            st.toast(f"❤️ {winner.get('title')} favorilere eklendi!")
+            _rerun_scoped()
+
+    winner_id = winner.get("id")
+    if feedback_manager.is_watched(winner_id):
+        st.success("Beğendin", icon="✅")
+    elif feedback_manager.is_disliked(winner_id):
+        st.warning("Beğenmedin", icon="🚫")
+    else:
+        fb_col1, fb_col2 = st.columns(2)
+        with fb_col1:
+            if st.button("✅ Beğendim", key="dialog_watched", width="stretch"):
+                feedback_manager.mark_watched(winner)
+                st.toast(f"✅ '{winner.get('title')}' beğendiğin olarak kaydedildi.")
+                _rerun_scoped()
+        with fb_col2:
+            if st.button("🚫 Beğenmedim", key="dialog_disliked", width="stretch"):
+                feedback_manager.mark_disliked(winner)
+                if is_fav:
+                    fav_manager.remove(winner_id)
+                st.toast(f"🚫 '{winner.get('title')}' bir daha önerilmeyecek.")
+                _rerun_scoped()
+
+
+def _render_card_deck(items: list[dict], fav_manager: FavoritesManager, feedback_manager: FeedbackManager, tmdb: TMDBClient) -> None:
+    """
+    Yüzü kapalı kart destesi — çarka alternatif bir seçim ritüeli.
+    Kullanıcı 8 karttan birini seçer, o kart anında açılıp (çarktaki gibi
+    merkezi pop-up ile) sonucu gösterir. Çarkın aksine bekleme animasyonu
+    olmadığı için sonuç gecikmesiz gösteriliyor.
+
+    Kartlar, gerçek bir iskambil destesi gibi hafifçe yelpaze açılmış
+    (döndürülmüş ve üst üste binmiş) şekilde gösteriliyor — bunu
+    `st.container(key=...)` ile elde ediyoruz, çünkü Streamlit bu durumda
+    otomatik olarak `st-key-<key>` CSS sınıfı üretiyor ve biz de bu sınıfı
+    hedefleyerek SADECE bu deste bloğuna özel stil veriyoruz (sayfadaki
+    diğer sütun/buton düzenlerini etkilemiyor).
+    """
+    st.session_state.setdefault("deck_seed", 0)
+
+    deck_items = items[:8]
+
+    st.markdown('<div class="section-title" style="text-align:center;">🃏 Kart Destesi</div>', unsafe_allow_html=True)
+    st.caption("Bir kart seç, açılsın — hangi film çıkacağını önceden bilmiyorsun.")
+
+    # Sadece bu deste bloğuna özel yelpaze (fan) stili.
+    st.markdown(
+        """
+        <style>
+        .st-key-card_deck_fan {
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 0 !important;
+            padding: 20px 0 28px;
+        }
+        .st-key-card_deck_fan > div {
+            margin-left: -28px;
+            transition: transform 0.15s ease, z-index 0s;
+        }
+        .st-key-card_deck_fan > div:first-child { margin-left: 0; }
+        .st-key-card_deck_fan button {
+            width: 80px !important;
+            height: 118px !important;
+            padding: 8px !important;
+            border-radius: 10px 10px 12px 12px !important;
+            border: 1.5px solid #4a4a4a !important;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            overflow: hidden;
+            color: transparent !important;
+            background-color: #141414 !important;
+            background-image:
+                repeating-linear-gradient(45deg, #2a2a2a 0, #2a2a2a 3px, transparent 3px, transparent 10px),
+                repeating-linear-gradient(-45deg, #2a2a2a 0, #2a2a2a 3px, transparent 3px, transparent 10px),
+                linear-gradient(160deg, #831010, #e50914 40%, #831010 70%) !important;
+            background-size: 100% 100%, 100% 100%, 100% 100% !important;
+            position: relative;
+        }
+        /* Dar (mobil) ekranlarda kartları küçültüp örtüşmeyi azaltıyoruz,
+           böylece 8 kart yatayda taşmadan sığıyor. */
+        @media (max-width: 480px) {
+            .st-key-card_deck_fan button {
+                width: 46px !important;
+                height: 70px !important;
+            }
+            .st-key-card_deck_fan > div {
+                margin-left: -16px;
+            }
+        }
+        .st-key-card_deck_fan button::before {
+            content: "";
+            position: absolute;
+            inset: 8px;
+            border: 1.5px solid rgba(255,255,255,0.55);
+            border-radius: 5px;
+            pointer-events: none;
+        }
+        .st-key-card_deck_fan button:hover {
+            border-color: #f5c518 !important;
+            box-shadow: 0 8px 18px rgba(0,0,0,0.6);
+        }
+
+        /* KARIŞTIRMA ANİMASYONU: Deste her render edildiğinde (ilk açılışta
+           ve "Yeni Deste Karıştır" ile) kartlar ortadan, küçük ve dönüşsüz
+           bir halde belirip, birer birer (gecikmeli) kendi yelpaze
+           konumlarına "dağıtılıyor" gibi yerleşiyor. */
+        @keyframes dealCard1 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-18deg) translateY(14px); } }
+        @keyframes dealCard2 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-13deg) translateY(7px); } }
+        @keyframes dealCard3 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-8deg) translateY(3px); } }
+        @keyframes dealCard4 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(-3deg); } }
+        @keyframes dealCard5 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(3deg); } }
+        @keyframes dealCard6 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(8deg) translateY(3px); } }
+        @keyframes dealCard7 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(13deg) translateY(7px); } }
+        @keyframes dealCard8 { from { opacity:0; transform: scale(0.4) rotate(0deg) translateY(40px); } to { opacity:1; transform: rotate(18deg) translateY(14px); } }
+        .st-key-card_deck_fan > div:nth-child(1) button { animation: dealCard1 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.00s; }
+        .st-key-card_deck_fan > div:nth-child(2) button { animation: dealCard2 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.05s; }
+        .st-key-card_deck_fan > div:nth-child(3) button { animation: dealCard3 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.10s; }
+        .st-key-card_deck_fan > div:nth-child(4) button { animation: dealCard4 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.15s; }
+        .st-key-card_deck_fan > div:nth-child(5) button { animation: dealCard5 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.20s; }
+        .st-key-card_deck_fan > div:nth-child(6) button { animation: dealCard6 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.25s; }
+        .st-key-card_deck_fan > div:nth-child(7) button { animation: dealCard7 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.30s; }
+        .st-key-card_deck_fan > div:nth-child(8) button { animation: dealCard8 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; animation-delay: 0.35s; }
+
+        .st-key-card_deck_fan > div:hover button {
+            transform: translateY(-18px) scale(1.08) !important;
+            z-index: 20;
+            position: relative;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    clicked_item = None
+    with st.container(key="card_deck_fan", horizontal=True):
+        for i, item in enumerate(deck_items):
+            key = f"deck_card_{st.session_state['deck_seed']}_{i}"
+            if st.button("🂠", key=key, help=f"{i + 1}. kart"):
+                clicked_item = item
+
+    col_a, col_b, col_c = st.columns([1, 1.4, 1])
+    with col_b:
+        st.caption(f"🂡 Deste #{st.session_state['deck_seed'] + 1}")
+        if st.button("🔄 Yeni Deste Karıştır", key="deck_reshuffle_btn", width="stretch"):
+            st.session_state["deck_seed"] += 1
+            st.toast("🔀 Deste karıştırıldı!")
+            st.rerun()
+
+    if clicked_item is not None:
+        _show_winner_dialog(clicked_item, fav_manager, feedback_manager, tmdb, mode="cards")
+
+
+def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_manager: FeedbackManager) -> None:
+    """Filtre paneli + ortada çark + genişletilebilir tam sonuç listesi."""
+
+    mood_options = list(MOOD_FILTERS.keys())
+    genre_options = list(GENRE_FILTERS.keys())
+
+    # LinkedIn geri bildirimi #3: URL artık sadece oturum kimliğini değil,
+    # ruh hali/tür seçimini de hatırlıyor. Widget'lar oluşturulmadan ÖNCE,
+    # session_state'e henüz hiç değer atanmamışsa (yani bu oturumda ilk
+    # kez açılıyorsa) URL'deki değerleri session_state'e önceden yazıyoruz
+    # — Streamlit widget'ları, `key` ile eşleşen bir session_state değeri
+    # zaten varsa onu başlangıç değeri olarak kullanır.
+    if "filter_mode" not in st.session_state:
+        url_mode = st.query_params.get("mode")
+        if url_mode in ("mood", "genre", "favorites", "random"):
+            st.session_state["filter_mode"] = url_mode
+    if "mood_multiselect" not in st.session_state:
+        url_moods = st.query_params.get("moods")
+        if url_moods:
+            valid = [m for m in url_moods.split(",") if m in MOOD_FILTERS]
+            if valid:
+                st.session_state["mood_multiselect"] = valid
+    if "genre_multiselect" not in st.session_state:
+        url_genres = st.query_params.get("genres")
+        if url_genres:
+            valid = [g for g in url_genres.split(",") if g in GENRE_FILTERS]
+            if valid:
+                st.session_state["genre_multiselect"] = valid
+
+    with st.sidebar:
+        st.markdown('<div class="section-title">🎯 Filtreler</div>', unsafe_allow_html=True)
+
+        # Ruh hali, tür ve favoriler artık birbirini dışlıyor — "Ağlamalık +
+        # Komedi" gibi anlamsız kombinasyonlar imkansız, ve "favorilerimden
+        # çevir" artık ayrı bir sekmede değil, buradaki filtrelerden biri.
+        filter_mode = st.radio(
+            "Nasıl filtrelemek istersin?",
+            options=["mood", "genre", "favorites", "random"],
+            format_func=lambda k: {
+                "mood": "🎭 Ruh Haline Göre",
+                "genre": "🎬 Türe Göre",
+                "favorites": "❤️ Favorilerimden",
+                "random": "🎲 Rastgele",
+            }[k],
+            key="filter_mode",
+        )
+
+        selected_moods: list[str] = []
+        selected_genres: list[str] = []
+
+        if filter_mode == "mood":
+            selected_moods = st.multiselect(
+                "Ruh hali",
+                options=mood_options,
+                format_func=lambda k: f"{MOOD_FILTERS[k].icon} {MOOD_FILTERS[k].label}",
+                key="mood_multiselect",
+            )
+        elif filter_mode == "genre":
+            selected_genres = st.multiselect(
+                "Tür",
+                options=genre_options,
+                format_func=lambda k: f"{GENRE_FILTERS[k].icon} {GENRE_FILTERS[k].label}",
+                key="genre_multiselect",
+            )
+
+        # Güncel seçimleri URL'ye yazıyoruz ki link paylaşılsa/yer imine
+        # eklense/sayfa yenilense bile aynı filtre kurulumuna dönülebilsin.
+        st.query_params["mode"] = filter_mode
+        if selected_moods:
+            st.query_params["moods"] = ",".join(selected_moods)
+        elif "moods" in st.query_params:
+            del st.query_params["moods"]
+        if selected_genres:
+            st.query_params["genres"] = ",".join(selected_genres)
+        elif "genres" in st.query_params:
+            del st.query_params["genres"]
+
+        # Favoriler modunda TMDB filtreleri (puan/oy/yıl/süre/tür) anlamsız —
+        # favori listen zaten sabit ve küçük bir küme. Bu yüzden bu modda
+        # sadece favoriler kullanılıyor, aşağıdaki filtreler gizleniyor.
+        if filter_mode == "favorites":
+            fav_count = fav_manager.get_count()
+            st.caption(f"❤️ {fav_count} favorin arasından seçim yapılacak.")
+            rating_range = (0.0, 10.0)
+            year_range = (1950, datetime.date.today().year)
+            content_type = "movie"
+            runtime_range = None
+            random_mode = False
+        elif filter_mode == "random":
+            rating_range = st.slider("Min puan", 0.0, 10.0, (7.0, 10.0), 0.5)
+            content_type = st.selectbox(
+                "İçerik türü",
+                options=["movie", "tv"],
+                format_func=lambda x: "🎥 Film" if x == "movie" else "📺 Dizi",
+                key="random_content_type",
+            )
+            year_range = (1950, datetime.date.today().year)
+            runtime_range = None
+            random_mode = True
+        else:
+            rating_range = st.slider("Puan aralığı", 0.0, 10.0, (6.0, 10.0), 0.5)
+            current_year = datetime.date.today().year
+            year_range = st.slider("Yapım yılı aralığı", 1950, current_year, (1990, current_year), key="year_range_slider")
+            content_type = st.selectbox(
+                "İçerik türü",
+                options=["movie", "tv"],
+                format_func=lambda x: "🎥 Film" if x == "movie" else "📺 Dizi",
+            )
+            runtime_range = None
+            if content_type == "movie":
+                runtime_range = st.slider("Süre (dakika)", 0, 240, (0, 240), 10)
+            else:
+                st.caption("ℹ️ TMDB, dizilerde süre filtresini desteklemiyor.")
+            random_mode = False
+
+    mood_genre_ids = get_mood_genre_ids(selected_moods)
+    mood_keyword_ids = get_mood_keyword_ids(selected_moods)
+    genre_genre_ids = get_genre_genre_ids(selected_genres)
+
+    # Havuzu çekerken sabit bir varsayılan sıralama kullanıyoruz. Kullanıcıya
+    # gösterilen "Sırala" seçimi artık aşağıda, "Tüm sonuçları listele"
+    # bölümünde ve sadece o listenin görünüm sırasını etkiliyor — havuzun
+    # kendisini değiştirmiyor, bu yüzden filters_signature'a dahil değil.
+    default_sort_label = "Popülerlik"
+
+    filters_signature = (
+        filter_mode,
+        tuple(sorted(selected_moods)),
+        tuple(sorted(selected_genres)),
+        rating_range,
+        year_range,
+        runtime_range,
+        content_type,
+        random_mode,
+    )
+    if st.session_state.get("filters_signature") != filters_signature:
+        st.session_state.filters_signature = filters_signature
+        st.session_state.wheel_winner = None
+        st.session_state.spin_seed = st.session_state.get("spin_seed", 0)
+
+    if filter_mode in ("mood", "genre") and not selected_moods and not selected_genres:
+        st.info("👈 Devam etmeden önce soldan bir **ruh hali** ya da **tür** seç.")
+        return
+
+    if filter_mode == "favorites":
+        pool = fav_manager.get_all()
+        total_results = len(pool)
+    else:
+        with st.spinner("İçerikler yükleniyor..."):
+            pool, total_results = fetch_filtered_pool(
+                _tmdb=tmdb,
+                mood_genre_ids=tuple(sorted(mood_genre_ids)),
+                mood_keyword_ids=tuple(sorted(mood_keyword_ids)),
+                genre_genre_ids=tuple(sorted(genre_genre_ids)),
+                rating_range=rating_range,
+                year_range=year_range,
+                runtime_range=runtime_range,
+                sort_label=default_sort_label,
+                content_type=content_type,
+                random_mode=random_mode,
+            )
+
+    # "İzledim" veya "Bu değildi" olarak işaretlenmiş içerikler, hangi
+    # modda olursak olalım havuzdan çıkarılıyor — bir daha karşımıza çıkmasınlar.
+    pool_before_feedback = len(pool)
+    pool = feedback_manager.filter_pool(pool)
+    excluded_count = pool_before_feedback - len(pool)
+
+    if filter_mode == "favorites":
+        if not pool:
+            if pool_before_feedback > 0:
+                st.info("📭 Favorilerindeki her şeyi beğenmemiş görünüyorsun. Yeni favoriler ekle!")
+            else:
+                st.info(
+                    "📭 Henüz favori eklememişsin.\n\n"
+                    "Bir mod veya tür seçip beğendiğin içerikleri **'Favorilere Ekle'** "
+                    "ile listene ekleyebilir, sonra buradan çevirebilirsin."
+                )
+            return
+        st.caption(f"❤️ Favorilerinden seçim yapılıyor ({total_results} favori).")
+    elif random_mode:
+        st.caption(f"🎲 Rastgele mod: ruh hali/tür seçimlerin yok sayılıyor, kaliteli içerik havuzundan rastgele seçiliyor ({total_results} sonuç).")
+    else:
+        chosen = [MOOD_FILTERS[k].label for k in selected_moods] + [GENRE_FILTERS[k].label for k in selected_genres]
+        st.caption(f"🎯 Uygulanan filtreler: {', '.join(chosen)} — toplam {total_results:,} sonuç".replace(",", "."))
+        if mood_keyword_ids:
+            st.caption("🔍 Tek ruh hali seçili olduğu için tür eşleşmesinin ötesinde, o temaya uygun anahtar kelimeyle de daraltıldı (ör. gerçekten 'hüzünlü' etiketli filmler).")
+
+    if excluded_count > 0:
+        st.caption(f"🚫 {excluded_count} içerik beğenmediğin için gizlendi.")
+
+    wheel_items = random.sample(pool, min(20, len(pool))) if pool else []
+
+    st.session_state.setdefault("spin_seed", 0)
+    st.session_state.setdefault("wheel_winner", None)
+
+    if len(wheel_items) < 2:
+        st.warning("🔍 Seçim için yeterli sonuç yok. Filtreleri biraz gevşetmeyi dene.")
+        return
+
+    wcol1, wcol2, wcol3 = st.columns([1, 2, 1])
+    with wcol2:
+        selection_mode = st.radio(
+            "Nasıl seçelim?",
+            options=["wheel", "cards"],
+            format_func=lambda k: "🎡 Çark" if k == "wheel" else "🃏 Kart Çek",
+            horizontal=True,
+            key="selection_mode",
+        )
+        st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
+
+        if selection_mode == "cards":
+            _render_card_deck(wheel_items, fav_manager, feedback_manager, tmdb)
+        else:
+            st.markdown('<div class="section-title" style="text-align:center;">🎰 Film Çarkı</div>', unsafe_allow_html=True)
+
+            spin_clicked = st.button("🎰 Çarkı Çevir!", width="stretch", type="primary")
+
+            if spin_clicked:
+                st.session_state.wheel_winner = random.choice(wheel_items)
+                st.session_state.spin_seed += 1
+
+            winning_index = None
+            autoplay = False
+            winner = st.session_state.wheel_winner
+            if winner is not None:
+                try:
+                    winning_index = wheel_items.index(winner)
+                    autoplay = spin_clicked
+                except ValueError:
+                    winner = None
+                    st.session_state.wheel_winner = None
+
+            render_roulette_wheel(
+                wheel_items,
+                winning_index=winning_index,
+                autoplay=autoplay,
+                spin_seed=st.session_state.spin_seed,
+            )
+
+            if spin_clicked and winner is not None:
+                # Çark ~4 saniyelik bir CSS animasyonuyla dönüyor (tarayıcıda,
+                # iframe içinde). Kazananı hemen göstermek yerine kısa bir
+                # bekleme koyup afişin çark tamamen durmadan ekrana düşmesini
+                # engelliyoruz.
+                with st.spinner("Çark dönüyor..."):
+                    time.sleep(3.2)
+                _show_winner_dialog(winner, fav_manager, feedback_manager, tmdb, mode="wheel")
+
+    _render_full_results_section(
+        tmdb, fav_manager, feedback_manager, pool, total_results, filters_signature,
+        mood_genre_ids, genre_genre_ids, mood_keyword_ids,
+        rating_range, year_range, runtime_range,
+        content_type, default_sort_label,
+    )
+
+
+@st.fragment
+def _render_full_results_section(
+    tmdb: TMDBClient,
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    pool: list[dict],
+    total_results: int,
+    filters_signature: tuple,
+    mood_genre_ids: list[int],
+    genre_genre_ids: list[int],
+    mood_keyword_ids: list[int],
+    rating_range: tuple[float, float],
+    year_range: tuple[int, int],
+    runtime_range: Optional[tuple[int, int]],
+    content_type: str,
+    default_sort_label: str,
+) -> None:
+    """
+    "Tüm sonuçları listele" bölümü — kendi sayfalama durumunu tutuyor.
+    `pool` sadece ilk sayfayı (~20 sonuç) temsil eder; kullanıcı "Daha
+    fazla göster" ile ek TMDB sayfaları isteyebilir. Bu, çarkın küçük
+    örnekleminden (max 20 rastgele) tamamen bağımsız çalışır.
+
+    `@st.fragment` ile işaretli: "Daha fazla göster" butonuna basınca
+    SADECE bu bölüm yeniden çiziliyor, tüm sayfa değil — bu yüzden çark ve
+    sidebar yerinde kalıyor, tarayıcı sayfanın başına atlamıyor.
+    """
+    if st.session_state.get("list_pool_sig") != filters_signature:
+        st.session_state["list_pool_sig"] = filters_signature
+        st.session_state["list_pool_items"] = list(pool)
+
+        # `pool` artık fetch_filtered_pool içinde çeşitliliği artırmak için
+        # zaten en fazla 3 sayfaya (60 sonuca) kadar önden getiriliyor, bu
+        # yüzden burada ayrıca bir sayfa daha çekmeye gerek yok — bu sadece
+        # aynı sayfayı tekrar isteyip israf ederdi. "Daha fazla göster"
+        # butonu, zaten kapsanan sayfalardan hemen sonrasından devam etsin
+        # diye kabaca kaç sayfanın karşılandığını tahmin ediyoruz.
+        st.session_state["list_pool_page"] = max(1, -(-len(pool) // 20))  # yukarı yuvarlama
+
+    st.session_state.setdefault("list_pool_items", list(pool))
+    st.session_state.setdefault("list_pool_page", 1)
+
+    display_pool = st.session_state["list_pool_items"]
+
+    st.divider()
+    with st.expander(
+        f"📋 Tüm sonuçları listele ({len(display_pool)} / {total_results:,} sonuç)".replace(",", "."),
+        expanded=st.session_state.get("list_expanded_once", False),
+    ):
+        st.session_state["list_expanded_once"] = True
+        if display_pool:
+            list_sort_label = st.selectbox(
+                "Sırala",
+                options=list(SORT_OPTIONS.keys()),
+                key="list_sort_label",
+                help="Sadece bu listenin görünüm sırasını değiştirir, çarktaki havuzu etkilemez.",
+            )
+            sort_keys = {
+                "Popülerlik": lambda item: item.get("popularity", 0),
+                "Puan (yüksekten düşüğe)": lambda item: item.get("vote_average", 0),
+                "Yeni çıkanlar": lambda item: item.get("release_date") or "",
+            }
+            sorted_pool = sorted(display_pool, key=sort_keys.get(list_sort_label, sort_keys["Popülerlik"]), reverse=True)
+        else:
+            sorted_pool = display_pool
+
+        display_content_grid(sorted_pool, fav_manager, feedback_manager, tmdb, show_similarity=False, key_prefix="home", is_fragment=True)
+
+        max_pages = 10  # TMDB'yi gereksiz zorlamamak için makul bir tavan
+        can_load_more = len(display_pool) < total_results and st.session_state["list_pool_page"] < max_pages
+
+        if can_load_more:
+            if st.button("📥 Daha fazla göster (+20)", key="load_more_btn", width="stretch"):
+                next_page = st.session_state["list_pool_page"] + 1
+                sort_by = resolve_sort_by(default_sort_label, content_type)
+                combined_ids = list(mood_genre_ids) or list(genre_genre_ids)
+                combined_keywords = list(mood_keyword_ids) if mood_genre_ids else []
+                with st.spinner("Daha fazla sonuç yükleniyor..."):
+                    more = _discover(
+                        tmdb, combined_ids, combined_keywords,
+                        rating_range, year_range, runtime_range,
+                        sort_by, content_type, next_page,
+                    )
+                existing_ids = {item.get("id") for item in st.session_state["list_pool_items"]}
+                st.session_state["list_pool_items"].extend(
+                    item for item in more if item.get("id") not in existing_ids
+                )
+                st.session_state["list_pool_page"] = next_page
+                # Sadece bu fragment'ı yeniden çalıştır (tüm sayfayı değil) —
+                # böylece sayfa başa sarmıyor, çark ve sidebar yerinde kalıyor.
+                try:
+                    st.rerun(scope="fragment")
+                except Exception:
+                    # Bazı ortamlarda fragment-scope rerun desteklenmeyebilir;
+                    # bu durumda normal (tüm sayfa) yeniden çalıştırmaya düş.
+                    st.rerun()
+        elif display_pool and len(display_pool) >= total_results:
+            st.caption("✅ Tüm sonuçlar yüklendi.")
+
+
+# =============================================================================
+# ANA UYGULAMA
+# =============================================================================
+
+def main():
+    """Ana uygulama fonksiyonu."""
+
+    st.markdown(
+        """
+        <div class="main-header">
+            <div>
+                <h1>Cine<span>Roulette</span></h1>
+                <p>Ne izleyeceğine karar veremedin mi? Çarkı çevir ya da bir kart çek.</p>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # "Daha fazla göster" gibi butonlar her tıklamada bir yeniden çalıştırma
+    # (rerun) tetikliyor ve Streamlit sayfayı yeniden çizerken tarayıcı
+    # kaydırma konumunu kaybedip başa dönebiliyor. Bu script, kaydırma
+    # konumunu sürekli kaydedip her yeniden çizimden hemen sonra geri
+    # yüklüyor — böylece kullanıcı bulunduğu yerde kalıyor.
+    st.iframe(
+        """
+        <script>
+        try {
+            const mainDoc = window.parent.document;
+            const scrollKey = 'cineroulette_scroll_y';
+
+            const selectors = [
+                '[data-testid="stAppViewContainer"]',
+                '[data-testid="stMain"]',
+                'section.main',
+            ];
+            let container = null;
+            for (const sel of selectors) {
+                const el = mainDoc.querySelector(sel);
+                if (el) { container = el; break; }
+            }
+            if (!container) { container = mainDoc.documentElement; }
+
+            const restore = () => {
+                const saved = window.parent.sessionStorage.getItem(scrollKey);
+                if (saved !== null) {
+                    container.scrollTop = parseInt(saved, 10);
+                    window.parent.scrollTo(0, parseInt(saved, 10));
+                }
+            };
+            // Streamlit rerun sonrası DOM'un tam oturması icin kisa bir gecikmeyle de deneyelim.
+            restore();
+            setTimeout(restore, 50);
+            setTimeout(restore, 200);
+
+            const save = () => {
+                const y = container.scrollTop || window.parent.scrollY || 0;
+                window.parent.sessionStorage.setItem(scrollKey, y);
+            };
+            container.addEventListener('scroll', save);
+            window.parent.addEventListener('scroll', save);
+        } catch (e) {
+            // Sandbox/erişim kısıtlaması olursa sessizce yoksay — sayfanın
+            // geri kalanını bozmasın.
+        }
+        </script>
+        """,
+        height=1,
+    )
+
+    tmdb = init_tmdb_client()
+
+    if not tmdb:
+        st.error(
+            "⚠️ **TMDB API anahtarı bulunamadı!**\n\n"
+            "Lütfen aşağıdaki adımları takip edin:\n\n"
+            "1. [TMDB](https://www.themoviedb.org/) sitesine üye olun\n"
+            "2. Hesap ayarlarından API anahtarı alın\n"
+            "3. Proje klasöründe `.env` dosyası oluşturun\n"
+            "4. `TMDB_API_KEY=sizin_api_anahtariniz` şeklinde ekleyin"
+        )
+        with st.expander("📝 Örnek .env dosyası"):
+            st.code("TMDB_API_KEY=abc123xyz789", language="text")
+        return
+
+    ml_engine = init_ml_engine()
+    session_id = get_or_create_session_id()
+    fav_manager = init_favorites_manager(session_id)
+    feedback_manager = init_feedback_manager(session_id)
+
+    tab_home, tab_ai, tab_favorites, tab_feedback = st.tabs(
+        ["🎰 Anasayfa", "🤖 AI Önerileri", "❤️ Favorilerim", "👍👎 Geri Bildirimlerim"]
+    )
+
+    with tab_home:
+        render_home_tab(tmdb, fav_manager, feedback_manager)
+
+    with tab_ai:
+        st.markdown('<div class="section-title">🤖 Senin İçin Öneriler</div>', unsafe_allow_html=True)
+        st.caption(AI_RECOMMENDATION_FILTER.description)
+
+        ai_content_type = st.selectbox(
+            "İçerik türü",
+            options=["movie", "tv"],
+            format_func=lambda x: "🎥 Film" if x == "movie" else "📺 Dizi",
+            key="ai_content_type",
+        )
+
+        favorites = fav_manager.get_for_ml()
+        if not favorites:
+            st.warning(
+                "🤖 AI önerileri için önce favorilerine birkaç film/dizi eklemelisin!\n\n"
+                "**Nasıl yapılır:**\n"
+                "1. Anasayfa'dan beğendiğin filmlere 'Favorilere Ekle' butonuna tıkla\n"
+                "2. Bu sekmeye geri dön"
+            )
+        else:
+            # Sidebar'daki "Yapım yılı aralığı" filtresi sayfa geneli bir
+            # öğe (sadece Anasayfa'ya özel değil), bu yüzden AI önerilerine
+            # de aynı aralığı uyguluyoruz. Favoriler/Rastgele modundaysa
+            # (bu slider hiç render edilmemiş olabilir) makul bir varsayılana
+            # (filtresiz: tüm yıllar) düşüyoruz.
+            ai_year_range = st.session_state.get("year_range_slider", (1950, datetime.date.today().year))
+            _render_ai_recommendations_section(tmdb, ml_engine, fav_manager, feedback_manager, favorites, ai_content_type, ai_year_range)
+
+    with tab_favorites:
+        display_favorites_page(tmdb, fav_manager, feedback_manager)
+
+    with tab_feedback:
+        display_feedback_page(fav_manager, feedback_manager)
+
+
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    main()
