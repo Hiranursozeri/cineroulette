@@ -623,6 +623,12 @@ def fetch_ai_recommendations(
                 seen_ids.add(item.get("id"))
                 unique_pool.append(item)
 
+        # Kullanıcı isteği: AI önerilerinde sadece 5.0 ve üzeri puanlı
+        # içerikler bulunsun. "Popüler" havuzu TMDB'de puana göre
+        # filtrelenmediği için (sadece popülerliğe göre sıralı), bunu
+        # burada kendimiz garanti altına alıyoruz.
+        unique_pool = [item for item in unique_pool if (item.get("vote_average") or 0) >= 5.0]
+
         recommendations = ml_engine.get_recommendations(
             favorites=favorites,
             candidate_pool=unique_pool,

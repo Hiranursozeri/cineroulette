@@ -1290,5 +1290,37 @@ def test_ai_onerileri_4_tur_ile_calisiyor_hatasiz():
         _stop_patches(patches)
 
 
+def test_ai_onerileri_5_altindaki_puanlari_eliyor():
+    """AI önerileri aday havuzu, 5.0'ın altındaki puanlı içerikleri hiç dikkate almamalı."""
+    low_and_high_rated = [
+        {"id": 1, "title": "Dusuk Puanli", "vote_average": 3.2, "overview": "x", "poster_url": None,
+         "release_date": "2020-01-01", "content_type": "movie", "popularity": 1, "genre_ids": [18]},
+        {"id": 2, "title": "Yuksek Puanli", "vote_average": 7.8, "overview": "x", "poster_url": None,
+         "release_date": "2020-01-01", "content_type": "movie", "popularity": 1, "genre_ids": [18]},
+    ]
+    at, patches = _mocked_app()
+    try:
+        with patch("utils.tmdb_client.TMDBClient.get_popular_movies", return_value=low_and_high_rated), \
+             patch("utils.tmdb_client.TMDBClient.discover_movies", return_value=low_and_high_rated):
+            fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
+            fav_btn.click().run(timeout=30)
+
+            compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
+            compute_btn.click().run(timeout=30)
+            assert len(at.exception) == 0
+
+            rec_titles = [r.get("title") for r in st_session_state_ai_recs(at)]
+            assert "Dusuk Puanli" not in rec_titles
+    finally:
+        _stop_patches(patches)
+
+
+def st_session_state_ai_recs(at):
+    try:
+        return at.session_state["ai_recommendations"] or []
+    except Exception:
+        return []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
