@@ -502,6 +502,54 @@ def _get_top_genres_from_favorites(favorites: list[dict], content_type: str, top
     return [genre_id for genre_id, _ in genre_counter.most_common(top_n)]
 
 
+@st.fragment
+def _render_ai_recommendations_section(
+    tmdb: TMDBClient,
+    ml_engine: RecommendationEngine,
+    fav_manager: FavoritesManager,
+    feedback_manager: FeedbackManager,
+    favorites: list[dict],
+    ai_content_type: str,
+) -> None:
+    """
+    "Önerileri Hesapla" butonu ve sonuç grid'i.
+
+    ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi): Bu bölüm bir
+    fragment olarak İŞARETLENMEDEN önce, "Önerileri Hesapla" butonuna
+    basmak TÜM SAYFAYI yeniden çalıştırıyordu — ve Streamlit'in `st.tabs`
+    bileşeni tam sayfa yeniden çalıştırmalarında aktif sekmeyi hatırlamadığı
+    için, kullanıcı AI Önerileri sekmesindeyken butona bastığında sayfa
+    "Anasayfa" sekmesine sıçrıyordu. `@st.fragment` ile işaretlemek, bu
+    butona tıklamanın SADECE bu bölümü yenilemesini sağlıyor — sekme
+    değişmiyor.
+    """
+    # NOT: Öneriler eskiden her sayfa etkileşiminde (ör. Anasayfa'da
+    # filtre değiştirmede) arka planda otomatik hesaplanıyordu — bu,
+    # görünmeden TMDB'ye 4-6 istek atıp tüm uygulamayı yavaşlatıyordu.
+    # Artık sadece kullanıcı butona bastığında hesaplanıyor.
+    st.session_state.setdefault("ai_recommendations", None)
+    st.session_state.setdefault("ai_recommendations_key", None)
+
+    cache_key = (ai_content_type, tuple(sorted(f.get("id") for f in favorites)))
+    compute_clicked = st.button("🔄 Önerileri Hesapla", type="primary", key="ai_compute_btn")
+
+    if compute_clicked:
+        with st.spinner("Öneriler hesaplanıyor..."):
+            recs = fetch_ai_recommendations(
+                tmdb=tmdb,
+                ml_engine=ml_engine,
+                favorites=favorites,
+                content_type=ai_content_type,
+            )
+            st.session_state.ai_recommendations = feedback_manager.filter_pool(recs)
+            st.session_state.ai_recommendations_key = cache_key
+
+    if st.session_state.ai_recommendations_key != cache_key:
+        st.info("Favorilerin veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
+    elif st.session_state.ai_recommendations is not None:
+        display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, tmdb, show_similarity=True, key_prefix="ai", is_fragment=True)
+
+
 def fetch_ai_recommendations(
     tmdb: TMDBClient,
     ml_engine: RecommendationEngine,
@@ -1659,31 +1707,7 @@ def main():
                 "2. Bu sekmeye geri dön"
             )
         else:
-            # NOT: Öneriler eskiden her sayfa etkileşiminde (ör. Anasayfa'da
-            # filtre değiştirmede) arka planda otomatik hesaplanıyordu — bu,
-            # görünmeden TMDB'ye 4-6 istek atıp tüm uygulamayı yavaşlatıyordu.
-            # Artık sadece kullanıcı butona bastığında hesaplanıyor.
-            st.session_state.setdefault("ai_recommendations", None)
-            st.session_state.setdefault("ai_recommendations_key", None)
-
-            cache_key = (ai_content_type, tuple(sorted(f.get("id") for f in favorites)))
-            compute_clicked = st.button("🔄 Önerileri Hesapla", type="primary", key="ai_compute_btn")
-
-            if compute_clicked:
-                with st.spinner("Öneriler hesaplanıyor..."):
-                    recs = fetch_ai_recommendations(
-                        tmdb=tmdb,
-                        ml_engine=ml_engine,
-                        favorites=favorites,
-                        content_type=ai_content_type,
-                    )
-                    st.session_state.ai_recommendations = feedback_manager.filter_pool(recs)
-                    st.session_state.ai_recommendations_key = cache_key
-
-            if st.session_state.ai_recommendations_key != cache_key:
-                st.info("Favorilerin veya seçtiğin içerik türü değişti. Güncel öneriler için yukarıdaki butona bas.")
-            elif st.session_state.ai_recommendations is not None:
-                display_content_grid(st.session_state.ai_recommendations, fav_manager, feedback_manager, tmdb, show_similarity=True, key_prefix="ai", is_fragment=False)
+            _render_ai_recommendations_section(tmdb, ml_engine, fav_manager, feedback_manager, favorites, ai_content_type)
 
     with tab_favorites:
         display_favorites_page(tmdb, fav_manager, feedback_manager)
