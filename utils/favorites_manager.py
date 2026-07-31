@@ -96,25 +96,48 @@ class FavoritesManager:
         arka uçtan (Supabase ya da dosya) bir kez çeker. Zaten
         yüklenmişse hiçbir şey yapmaz — bu, her rerun'da tekrar tekrar
         ağa gitmeyi önleyen asıl mekanizma.
+
+        ÖNEMLİ (düzeltilen hata): Önceki sürümde, Supabase okuması
+        BAŞARISIZ olsa bile "yüklendi" olarak işaretleniyordu — yani
+        geçici bir ağ hatası olduğunda kullanıcı o oturum boyunca hiç
+        favori göremiyordu, bir dahaki girişte de aynı sorun sürüyordu
+        (gerçek kullanıcılardan gelen "favorilerim kayboluyor" şikayeti
+        büyük ihtimalle buydu). Artık: bir deneme daha yapılıyor, hâlâ
+        başarısız olursa LOADED_FLAG işaretlenmiyor (bir sonraki
+        etkileşimde tekrar denenir) ve kullanıcıya görünür bir uyarı
+        gösteriliyor.
         """
         if st.session_state[self.LOADED_FLAG_KEY]:
             return
 
         if self._client is not None:
-            try:
-                response = (
-                    self._client.table("favorites")
-                    .select("content")
-                    .eq("session_id", self._session_id)
-                    .order("created_at", desc=True)
-                    .execute()
-                )
-                st.session_state[self.SESSION_KEY] = [row["content"] for row in response.data]
-            except Exception as e:
-                print(f"[Favorites] Supabase okuma hatası: {e}")
-        else:
-            self._load_from_file()
+            last_error = None
+            for attempt in range(2):  # ilk deneme + 1 yeniden deneme
+                try:
+                    response = (
+                        self._client.table("favorites")
+                        .select("content")
+                        .eq("session_id", self._session_id)
+                        .order("created_at", desc=True)
+                        .execute()
+                    )
+                    st.session_state[self.SESSION_KEY] = [row["content"] for row in response.data]
+                    st.session_state[self.LOADED_FLAG_KEY] = True
+                    return
+                except Exception as e:
+                    last_error = e
+                    print(f"[Favorites] Supabase okuma hatası (deneme {attempt + 1}/2): {e}")
 
+            # İki deneme de başarısız oldu — sessizce boş göstermek yerine
+            # kullanıcıyı bilgilendiriyoruz, ve LOADED_FLAG'i işaretlemiyoruz
+            # ki bir sonraki etkileşimde tekrar denensin.
+            st.warning(
+                "⚠️ Favorilerin şu anda yüklenemedi (bağlantı sorunu olabilir). "
+                "Bir şeye tıklayarak tekrar denenecek."
+            )
+            return
+
+        self._load_from_file()
         st.session_state[self.LOADED_FLAG_KEY] = True
 
     # -------------------------------------------------------------------

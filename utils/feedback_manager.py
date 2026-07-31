@@ -86,26 +86,41 @@ class FeedbackManager:
     # -------------------------------------------------------------------
 
     def _ensure_loaded(self) -> None:
+        """
+        Geri bildirim verisini bu oturumda henüz yüklenmediyse bir kez
+        çeker. ÖNEMLİ: okuma başarısız olursa LOADED_FLAG işaretlenmez
+        (bir sonraki etkileşimde tekrar denenir) — aksi halde geçici bir
+        ağ hatası, kullanıcının o oturum boyunca hiç veri görememesine
+        yol açardı.
+        """
         if st.session_state[self.LOADED_FLAG_KEY]:
             return
 
         if self._client is not None:
-            try:
-                response = (
-                    self._client.table("feedback")
-                    .select("content_id, status, content")
-                    .eq("session_id", self._session_id)
-                    .execute()
-                )
-                st.session_state[self.SESSION_KEY] = {
-                    "watched": [row["content"] for row in response.data if row["status"] == "watched"],
-                    "disliked": [row["content"] for row in response.data if row["status"] == "disliked"],
-                }
-            except Exception as e:
-                print(f"[Feedback] Supabase okuma hatası: {e}")
-        else:
-            self._load_from_file()
+            for attempt in range(2):  # ilk deneme + 1 yeniden deneme
+                try:
+                    response = (
+                        self._client.table("feedback")
+                        .select("content_id, status, content")
+                        .eq("session_id", self._session_id)
+                        .execute()
+                    )
+                    st.session_state[self.SESSION_KEY] = {
+                        "watched": [row["content"] for row in response.data if row["status"] == "watched"],
+                        "disliked": [row["content"] for row in response.data if row["status"] == "disliked"],
+                    }
+                    st.session_state[self.LOADED_FLAG_KEY] = True
+                    return
+                except Exception as e:
+                    print(f"[Feedback] Supabase okuma hatası (deneme {attempt + 1}/2): {e}")
 
+            st.warning(
+                "⚠️ Geri bildirim verilerin şu anda yüklenemedi (bağlantı sorunu olabilir). "
+                "Bir şeye tıklayarak tekrar denenecek."
+            )
+            return
+
+        self._load_from_file()
         st.session_state[self.LOADED_FLAG_KEY] = True
 
     # -------------------------------------------------------------------

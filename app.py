@@ -188,6 +188,18 @@ def init_ml_engine() -> RecommendationEngine:
     return RecommendationEngine()
 
 
+def _sync_session_id_to_browser(session_id: str) -> None:
+    """Oturum kimliğini tarayıcının localStorage'ına yazar (yedek kurtarma için)."""
+    st.iframe(
+        f"""
+        <script>
+        try {{ window.parent.localStorage.setItem('cineroulette_sid', '{session_id}'); }} catch (e) {{}}
+        </script>
+        """,
+        height=1,
+    )
+
+
 def get_or_create_session_id() -> str:
     """
     Her tarayıcı oturumu (ziyaretçi) için benzersiz bir kimlik üretir/döndürür.
@@ -201,16 +213,50 @@ def get_or_create_session_id() -> str:
     query param'ında (`?sid=...`) tutulur — böylece kullanıcı sayfayı
     yenilese (F5) bile aynı kimliğe (ve dolayısıyla aynı favori/geri
     bildirim verisine) geri dönebilir.
+
+    EK GÜVENCE: Kimlik ayrıca tarayıcının localStorage'ına da yazılır. Eğer
+    kullanıcı `?sid=` İÇERMEYEN bir linkten girerse (ör. tarayıcı geçmişi,
+    yer imi, ana ekran kısayolu — gerçek kullanıcılardan gelen "favorilerim
+    her girişte kayboluyor" geri bildirimi büyük ihtimalle bu yüzdendi),
+    localStorage'da daha önce kaydedilmiş bir kimlik varsa sayfa otomatik
+    olarak o kimlikle yeniden yüklenir, veriler kaybolmaz.
     """
-    if "session_id" not in st.session_state:
-        existing = st.query_params.get("sid")
-        if existing:
-            st.session_state["session_id"] = existing
-        else:
-            new_id = uuid.uuid4().hex[:16]
-            st.session_state["session_id"] = new_id
-            st.query_params["sid"] = new_id
-    return st.session_state["session_id"]
+    if "session_id" in st.session_state:
+        return st.session_state["session_id"]
+
+    existing = st.query_params.get("sid")
+    if existing:
+        st.session_state["session_id"] = existing
+        _sync_session_id_to_browser(existing)
+        return existing
+
+    # URL'de sid yok — localStorage'da kayıtlı bir kimlik olup olmadığını
+    # kontrol edip, varsa sayfayı o kimlikle yeniden yüklüyoruz.
+    st.iframe(
+        """
+        <script>
+        (function() {
+            try {
+                const saved = window.parent.localStorage.getItem('cineroulette_sid');
+                if (saved) {
+                    const url = new URL(window.parent.location.href);
+                    if (url.searchParams.get('sid') !== saved) {
+                        url.searchParams.set('sid', saved);
+                        window.parent.location.replace(url.toString());
+                    }
+                }
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=1,
+    )
+
+    new_id = uuid.uuid4().hex[:16]
+    st.session_state["session_id"] = new_id
+    st.query_params["sid"] = new_id
+    _sync_session_id_to_browser(new_id)
+    return new_id
 
 
 def init_favorites_manager(session_id: str) -> FavoritesManager:
@@ -440,6 +486,22 @@ def fetch_filtered_pool(
         return [], 0
 
 
+def _get_top_genres_from_favorites(favorites: list[dict], content_type: str, top_n: int = 2) -> list[int]:
+    """
+    Kullanıcının favorilerinden (SADECE aynı içerik türünde olanlardan —
+    film önerisi için dizi favorilerinin tür ID'lerini karıştırmamak
+    adına), en sık geçen tür ID'lerini çıkarır.
+    """
+    from collections import Counter
+    genre_counter = Counter()
+    for fav in favorites:
+        if fav.get("content_type", "movie") != content_type:
+            continue
+        for g in fav.get("genre_ids", []):
+            genre_counter[g] += 1
+    return [genre_id for genre_id, _ in genre_counter.most_common(top_n)]
+
+
 def fetch_ai_recommendations(
     tmdb: TMDBClient,
     ml_engine: RecommendationEngine,
@@ -453,7 +515,29 @@ def fetch_ai_recommendations(
     try:
         candidate_pool = []
 
+        # ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi): Önceki
+        # sürümde aday havuzu SADECE genel "popüler" ve "yüksek puanlı"
+        # içerikten geliyordu, kullanıcının favori TÜRLERİNE göre hiç
+        # filtrelenmiyordu — bu yüzden "4 Macera + 1 Romantik favoriledim
+        # ama önerilerde alakasız şeyler çıktı" gibi şikayetler oluyordu.
+        # Artık kullanıcının en sık favorilediği türlere göre de özel bir
+        # aday grubu ekliyoruz, böylece havuzun kendisi gerçekten alakalı.
+        top_genres = _get_top_genres_from_favorites(favorites, content_type, top_n=2)
+
         if content_type == "movie":
+            if top_genres:
+                candidate_pool.extend(tmdb.discover_movies(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    page=1,
+                ))
+                candidate_pool.extend(tmdb.discover_movies(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    page=2,
+                ))
             candidate_pool.extend(tmdb.get_popular_movies(page=1))
             candidate_pool.extend(tmdb.get_popular_movies(page=2))
             candidate_pool.extend(tmdb.discover_movies(
@@ -462,6 +546,19 @@ def fetch_ai_recommendations(
                 page=1,
             ))
         else:
+            if top_genres:
+                candidate_pool.extend(tmdb.discover_tv_shows(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    page=1,
+                ))
+                candidate_pool.extend(tmdb.discover_tv_shows(
+                    genre_ids=top_genres,
+                    min_vote_average=6.0,
+                    min_vote_count=50,
+                    page=2,
+                ))
             candidate_pool.extend(tmdb.get_popular_tv_shows(page=1))
             candidate_pool.extend(tmdb.get_popular_tv_shows(page=2))
             candidate_pool.extend(tmdb.discover_tv_shows(
@@ -1094,6 +1191,29 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
     mood_options = list(MOOD_FILTERS.keys())
     genre_options = list(GENRE_FILTERS.keys())
 
+    # LinkedIn geri bildirimi #3: URL artık sadece oturum kimliğini değil,
+    # ruh hali/tür seçimini de hatırlıyor. Widget'lar oluşturulmadan ÖNCE,
+    # session_state'e henüz hiç değer atanmamışsa (yani bu oturumda ilk
+    # kez açılıyorsa) URL'deki değerleri session_state'e önceden yazıyoruz
+    # — Streamlit widget'ları, `key` ile eşleşen bir session_state değeri
+    # zaten varsa onu başlangıç değeri olarak kullanır.
+    if "filter_mode" not in st.session_state:
+        url_mode = st.query_params.get("mode")
+        if url_mode in ("mood", "genre", "favorites", "random"):
+            st.session_state["filter_mode"] = url_mode
+    if "mood_multiselect" not in st.session_state:
+        url_moods = st.query_params.get("moods")
+        if url_moods:
+            valid = [m for m in url_moods.split(",") if m in MOOD_FILTERS]
+            if valid:
+                st.session_state["mood_multiselect"] = valid
+    if "genre_multiselect" not in st.session_state:
+        url_genres = st.query_params.get("genres")
+        if url_genres:
+            valid = [g for g in url_genres.split(",") if g in GENRE_FILTERS]
+            if valid:
+                st.session_state["genre_multiselect"] = valid
+
     with st.sidebar:
         st.markdown('<div class="section-title">🎯 Filtreler</div>', unsafe_allow_html=True)
 
@@ -1129,6 +1249,18 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
                 format_func=lambda k: f"{GENRE_FILTERS[k].icon} {GENRE_FILTERS[k].label}",
                 key="genre_multiselect",
             )
+
+        # Güncel seçimleri URL'ye yazıyoruz ki link paylaşılsa/yer imine
+        # eklense/sayfa yenilense bile aynı filtre kurulumuna dönülebilsin.
+        st.query_params["mode"] = filter_mode
+        if selected_moods:
+            st.query_params["moods"] = ",".join(selected_moods)
+        elif "moods" in st.query_params:
+            del st.query_params["moods"]
+        if selected_genres:
+            st.query_params["genres"] = ",".join(selected_genres)
+        elif "genres" in st.query_params:
+            del st.query_params["genres"]
 
         # Favoriler modunda TMDB filtreleri (puan/oy/yıl/süre/tür) anlamsız —
         # favori listen zaten sabit ve küçük bir küme. Bu yüzden bu modda

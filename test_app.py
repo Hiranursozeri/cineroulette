@@ -1083,5 +1083,194 @@ def test_liste_kartinda_fragman_sadece_istenince_cekiliyor():
         _stop_patches(patches)
 
 
+# =============================================================================
+# 19) FAVORİ KALICILIĞI SAĞLAMLIK TESTLERİ (LinkedIn geri bildirimi #1)
+# =============================================================================
+
+def test_supabase_okuma_hatasinda_tekrar_denenir():
+    """
+    KRİTİK (gerçek kullanıcı şikayeti): Supabase okuması geçici olarak
+    başarısız olursa, uygulama bunu 'yüklendi, favori yok' olarak
+    YANLIŞLIKLA işaretlememeli — bir sonraki denemede tekrar okumayı
+    denemeli, aksi halde kullanıcı o oturum boyunca (ve her yeni girişte)
+    favorilerini hiç göremez.
+    """
+    import streamlit as st
+    from unittest.mock import patch as mock_patch
+
+    call_count = {"n": 0}
+
+    class FailingThenWorkingTable:
+        def __init__(self):
+            self._filters = {}
+
+        def select(self, cols):
+            return self
+
+        def eq(self, col, val):
+            self._filters[col] = val
+            return self
+
+        def order(self, *a, **kw):
+            return self
+
+        def execute(self):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise ConnectionError("Geçici ağ hatası (simüle)")
+            class Resp:
+                data = [{"content": {"id": 1, "title": "Kurtarilan Film"}}]
+            return Resp()
+
+    class FakeClient:
+        def table(self, name):
+            return FailingThenWorkingTable()
+
+    st.session_state["favorites"] = []
+    st.session_state["favorites_loaded_from_backend"] = False
+
+    with mock_patch("utils.favorites_manager._get_supabase_client", return_value=FakeClient()):
+        from utils.favorites_manager import FavoritesManager
+        fm = FavoritesManager(session_id="retry_test")
+
+        result = fm.get_all()
+        assert call_count["n"] == 2, "İlk deneme başarısız olunca otomatik ikinci deneme yapılmalıydı"
+        assert len(result) == 1 and result[0]["title"] == "Kurtarilan Film"
+
+
+def test_supabase_iki_deneme_de_basarisizsa_gorunur_uyari_var():
+    """İki deneme de başarısız olursa kullanıcıya görünür bir uyarı gösterilmeli, sessizce boş geçilmemeli."""
+    import streamlit as st
+    from unittest.mock import patch as mock_patch
+
+    class AlwaysFailingTable:
+        def select(self, cols):
+            return self
+
+        def eq(self, col, val):
+            return self
+
+        def order(self, *a, **kw):
+            return self
+
+        def execute(self):
+            raise ConnectionError("Kalıcı hata (simüle)")
+
+    class FakeClient:
+        def table(self, name):
+            return AlwaysFailingTable()
+
+    st.session_state["favorites"] = []
+    st.session_state["favorites_loaded_from_backend"] = False
+
+    with mock_patch("utils.favorites_manager._get_supabase_client", return_value=FakeClient()):
+        from utils.favorites_manager import FavoritesManager
+        fm = FavoritesManager(session_id="fail_test")
+        result = fm.get_all()
+
+        assert result == []
+        # LOADED_FLAG işaretlenmemiş olmalı ki bir sonraki denemede tekrar denensin
+        assert st.session_state["favorites_loaded_from_backend"] is False
+
+
+# =============================================================================
+# 20) AI ÖNERİ TÜR HEDEFLEME TESTLERİ (LinkedIn geri bildirimi #2)
+# =============================================================================
+
+def test_favorilerden_en_sik_turler_dogru_cikariliyor():
+    """
+    KRİTİK (gerçek kullanıcı şikayeti): '4 Macera + 1 Romantik favoriledim
+    ama alakasız öneriler geldi' — çünkü aday havuzu hiç tür bazlı
+    filtrelenmiyordu. Şimdi favorilerden en sık türler doğru çıkarılmalı.
+    """
+    from app import _get_top_genres_from_favorites
+
+    favorites = [
+        {"id": 1, "content_type": "movie", "genre_ids": [12, 28]},   # Macera, Aksiyon
+        {"id": 2, "content_type": "movie", "genre_ids": [12]},        # Macera
+        {"id": 3, "content_type": "movie", "genre_ids": [12, 14]},   # Macera, Fantastik
+        {"id": 4, "content_type": "movie", "genre_ids": [12]},        # Macera
+        {"id": 5, "content_type": "movie", "genre_ids": [10749]},     # Romantik
+        {"id": 6, "content_type": "tv", "genre_ids": [35]},           # Komedi ama dizi - dahil edilmemeli
+    ]
+
+    top_genres = _get_top_genres_from_favorites(favorites, content_type="movie", top_n=2)
+    assert 12 in top_genres, "Macera (en sık geçen tür) listede olmalıydı"
+    assert 35 not in top_genres, "Dizi favorisinin türü, film önerileri için karışmamalı"
+
+
+def test_ai_onerileri_favori_turlere_gore_filtreleniyor():
+    """
+    Aday havuzu artık kullanıcının favori türlerine göre de (genel
+    popüler içeriğe ek olarak) TMDB'den özel olarak çekilmeli.
+    """
+    from unittest.mock import patch as mock_patch, MagicMock
+
+    discover_calls_with_genre = []
+
+    def fake_discover_movies(**kwargs):
+        if kwargs.get("genre_ids"):
+            discover_calls_with_genre.append(kwargs["genre_ids"])
+        return make_fake_items(n=3)
+
+    at, patches = _mocked_app()
+    try:
+        with mock_patch("utils.tmdb_client.TMDBClient.discover_movies", side_effect=fake_discover_movies), \
+             mock_patch("utils.tmdb_client.TMDBClient.get_popular_movies", return_value=make_fake_items(n=3)):
+            fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
+            fav_btn.click().run(timeout=30)
+
+            compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
+            assert compute_btn is not None
+            compute_btn.click().run(timeout=30)
+
+            assert len(at.exception) == 0
+            assert len(discover_calls_with_genre) > 0, "Favori türlere göre filtrelenmiş bir TMDB isteği hiç atılmadı"
+    finally:
+        _stop_patches(patches)
+
+
+# =============================================================================
+# 21) URL FİLTRE HATIRLAMA TESTLERİ (LinkedIn geri bildirimi #3)
+# =============================================================================
+
+def test_filtre_secimleri_urle_yaziliyor():
+    """Bir ruh hali/tür seçildiğinde, bu seçim URL query param'larına yazılmalı."""
+    at, patches = _mocked_app()
+    try:
+        mode_val = at.query_params.get("mode")
+        moods_val = at.query_params.get("moods")
+        # AppTest bazı durumlarda query param degerini liste olarak dondurebiliyor
+        mode_val = mode_val[0] if isinstance(mode_val, list) else mode_val
+        moods_val = moods_val[0] if isinstance(moods_val, list) else moods_val
+        assert mode_val == "mood"
+        assert moods_val == "aglamalik"
+    finally:
+        _stop_patches(patches)
+
+
+def test_url_parametresinden_filtre_geri_yukleniyor():
+    """
+    Sayfa, URL'de zaten `mode` ve `moods`/`genres` parametreleri varken
+    açılırsa, o filtre seçimini otomatik olarak geri yüklemeli.
+    """
+    discover_return = make_fake_items()
+    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
+         patch("utils.tmdb_client.TMDBClient.discover_movies", return_value=discover_return), \
+         patch("utils.tmdb_client.TMDBClient.discover_tv_shows", return_value=discover_return):
+        at = AppTest.from_file("app.py")
+        at.query_params["mode"] = "genre"
+        at.query_params["genres"] = "komedi"
+        at.run(timeout=30)
+
+        assert len(at.exception) == 0
+        radio = at.sidebar.radio(key="filter_mode")
+        assert radio.value == "genre", "URL'deki mod geri yüklenmedi"
+
+        genre_widget = next((m for m in at.multiselect if m.key == "genre_multiselect"), None)
+        assert genre_widget is not None
+        assert "komedi" in genre_widget.value, "URL'deki tür seçimi geri yüklenmedi"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
