@@ -423,6 +423,25 @@ class TMDBClient:
             "buy": [p["provider_name"] for p in region_data.get("buy", [])],
         }
 
+    def get_recommendations_for(
+        self,
+        content_id: int,
+        content_type: str,
+        page: int = 1,
+    ) -> list[dict]:
+        """
+        TMDB'nin KENDİ öneri uç noktasını kullanır — bu, TMDB'nin
+        milyonlarca kullanıcısının izleme/puanlama davranışından beslenen
+        gerçek bir collaborative filtering (işbirlikçi filtreleme)
+        sistemidir. Bizim kendi TF-IDF benzerliğimizden çok daha güçlü
+        bir "zevk" sinyali verir.
+        """
+        endpoint = f"/movie/{content_id}/recommendations" if content_type == "movie" else f"/tv/{content_id}/recommendations"
+        data = self._make_request(endpoint, {"page": page})
+        if data and "results" in data:
+            return self._enrich_results(data["results"], content_type)
+        return []
+
     def get_trailer_key(
         self,
         content_id: int,

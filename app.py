@@ -562,6 +562,7 @@ def fetch_ai_recommendations(
 
     try:
         candidate_pool = []
+        collab_scores: dict[int, int] = {}
 
         # ÖNEMLİ (gerçek kullanıcı geri bildirimi düzeltmesi): Önceki
         # sürümde aday havuzu SADECE genel "popüler" ve "yüksek puanlı"
@@ -569,8 +570,32 @@ def fetch_ai_recommendations(
         # filtrelenmiyordu — bu yüzden "4 Macera + 1 Romantik favoriledim
         # ama önerilerde alakasız şeyler çıktı" gibi şikayetler oluyordu.
         # Artık kullanıcının en sık favorilediği türlere göre de özel bir
-        # aday grubu ekliyoruz, böylece havuzun kendisi gerçekten alakalı.
-        top_genres = _get_top_genres_from_favorites(favorites, content_type, top_n=2)
+        # aday grubu ekliyoruz. top_n=4 (eskiden 2) — favori zevklerin daha
+        # çeşitliyse (ör. 3-4 farklı tür), bu çeşitliliği daha iyi yansıtır.
+        top_genres = _get_top_genres_from_favorites(favorites, content_type, top_n=4)
+
+        # YENİ: TMDB'nin KENDİ öneri motorunu da devreye sokuyoruz. Her
+        # favori için TMDB'nin "buna benzer/bunu izleyenler şunu da izledi"
+        # listesini çekiyoruz — bu, TMDB'nin milyonlarca kullanıcısından
+        # gelen gerçek bir collaborative filtering sinyali, bizim kendi
+        # metin benzerliğimizden çok daha güvenilir. Birden fazla favoride
+        # ORTAK çıkan bir film, tek bir favoride çıkandan daha güçlü bir
+        # eşleşmedir — bunu `collab_scores` ile sayıyoruz. API isteğini
+        # makul tutmak için en fazla 8 favoriye bakıyoruz.
+        for fav in favorites[:8]:
+            fav_id = fav.get("id")
+            if fav_id is None:
+                continue
+            try:
+                similar = tmdb.get_recommendations_for(fav_id, content_type)
+            except Exception:
+                continue
+            for item in similar:
+                item_id = item.get("id")
+                if item_id is None:
+                    continue
+                collab_scores[item_id] = collab_scores.get(item_id, 0) + 1
+                candidate_pool.append(item)
 
         if content_type == "movie":
             if top_genres:
@@ -626,6 +651,7 @@ def fetch_ai_recommendations(
             favorites=favorites,
             candidate_pool=unique_pool,
             top_n=12,
+            collab_scores=collab_scores,
         )
 
         # ML motoru aynı içeriği (farklı favorilerle eşleştiği için) birden
