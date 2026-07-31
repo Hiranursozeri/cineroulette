@@ -740,11 +740,11 @@ def _render_content_card_body(
 
     st.caption(f"{rating_display} | 📅 {year}")
 
-    # Açıklama (TMDB'den zaten geldiği için ek bir istek gerektirmiyor)
+    # Açıklama (TMDB'den zaten geldiği için ek bir istek gerektirmiyor) —
+    # kullanıcı isteği: kısaltılmadan tam metin gösterilsin.
     overview = (content.get("overview") or "").strip()
     if overview:
-        snippet = overview if len(overview) <= 160 else overview[:160].rsplit(" ", 1)[0] + "…"
-        st.caption(snippet)
+        st.caption(overview)
 
     if show_similarity and "similarity_score" in content:
         score = content["similarity_score"]
@@ -1026,7 +1026,7 @@ def _show_winner_dialog(
     st.image(winner.get("poster_url") or TMDBClient.PLACEHOLDER_POSTER, width="stretch")
     st.markdown(f"### {winner.get('title', 'Bilinmiyor')}")
     st.markdown(f"⭐ **Puan:** {winner.get('vote_average', 0):.1f}")
-    st.markdown(f"📝 {(winner.get('overview') or 'Açıklama yok.')[:280]}...")
+    st.markdown(f"📝 {winner.get('overview') or 'Açıklama yok.'}")
 
     # Nerede izlenir — sadece burada, tek bir içerik için sorgulanıyor
     # (tüm havuz için sorgulamak gereksiz yere çok fazla istek atardı).
