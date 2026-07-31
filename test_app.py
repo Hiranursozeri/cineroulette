@@ -1273,60 +1273,19 @@ def test_url_parametresinden_filtre_geri_yukleniyor():
 
 
 # =============================================================================
-# 22) TMDB İŞBİRLİKÇİ ÖNERİ SİNYALİ TESTLERİ ("Gerçek ML" isteği)
+# 22) TÜR GENİŞLETME SANITY TESTİ
 # =============================================================================
-
-def test_collab_scores_ile_ortak_onerilen_film_daha_yuksek_puan_aliyor():
-    """
-    Bir aday, birden fazla favoride TMDB'nin kendi önerisi olarak ortak
-    çıkıyorsa, sadece metin benzerliğine göre değil, bu ortaklığa göre de
-    daha yüksek bir skor almalı.
-    """
-    from ml.recommendation_engine import RecommendationEngine
-
-    engine = RecommendationEngine()
-    favorites = [
-        {"id": 1, "title": "Favori A", "overview": "Bir macera hikayesi.", "genre_ids": [12]},
-        {"id": 2, "title": "Favori B", "overview": "Baska bir macera hikayesi.", "genre_ids": [12]},
-    ]
-    candidates = [
-        {"id": 10, "title": "Ortak Onerilen", "overview": "Macera dolu bir hikaye.", "genre_ids": [12], "vote_average": 7.0},
-        {"id": 11, "title": "Sadece Metinle Benzer", "overview": "Macera dolu bir hikaye.", "genre_ids": [12], "vote_average": 7.0},
-    ]
-    # id=10, iki favoride de TMDB onerisi olarak cikmis; id=11 hic cikmamis
-    collab_scores = {10: 2}
-
-    results = engine.get_recommendations(favorites, candidates, top_n=5, collab_scores=collab_scores)
-    by_id = {r["id"]: r["similarity_score"] for r in results}
-    assert by_id[10] > by_id[11], "TMDB'de ortak onerilen film daha yuksek skor almaliydi"
-
-
-def test_tmdb_client_get_recommendations_for_calisiyor():
-    """TMDBClient.get_recommendations_for doğru uç noktayı çağırmalı ve sonucu zenginleştirmeli."""
-    from unittest.mock import patch as mock_patch
-    with patch("utils.tmdb_client.TMDBClient._validate_api_key", return_value=None), \
-         mock_patch.dict(os.environ, {"TMDB_API_KEY": "dummy"}):
-        from utils.tmdb_client import TMDBClient
-        tmdb = TMDBClient()
-        tmdb._make_request = lambda endpoint, params=None: {
-            "results": [{"id": 99, "title": "Onerilen Film", "vote_average": 7.5, "release_date": "2020-01-01"}]
-        }
-        result = tmdb.get_recommendations_for(1, "movie")
-        assert len(result) == 1
-        assert result[0]["id"] == 99
-
 
 def test_ai_onerileri_4_tur_ile_calisiyor_hatasiz():
     """Tür sayısı 2'den 4'e genişletildikten sonra AI önerileri hâlâ hatasız hesaplanabilmeli."""
     at, patches = _mocked_app()
     try:
-        with patch("utils.tmdb_client.TMDBClient.get_recommendations_for", return_value=make_fake_items(n=2, id_start=500)):
-            fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
-            fav_btn.click().run(timeout=30)
+        fav_btn = next(b for b in at.button if "Favorilere Ekle" in (b.label or ""))
+        fav_btn.click().run(timeout=30)
 
-            compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
-            compute_btn.click().run(timeout=30)
-            assert len(at.exception) == 0
+        compute_btn = next((b for b in at.button if "Önerileri Hesapla" in (b.label or "")), None)
+        compute_btn.click().run(timeout=30)
+        assert len(at.exception) == 0
     finally:
         _stop_patches(patches)
 

@@ -79,7 +79,6 @@ class RecommendationEngine:
         favorites: list[dict],
         candidate_pool: list[dict],
         top_n: int = 9,
-        collab_scores: dict = None,
     ) -> list[dict]:
         """
         Favorilere göre en benzer içerikleri bul.
@@ -94,27 +93,16 @@ class RecommendationEngine:
         yani bir aday sadece TEK bir favoriye bile çok benziyorsa yüksek
         puan alabiliyor.
 
-        YENİ: `collab_scores` — TMDB'nin kendi öneri motorundan gelen bir
-        sinyal. Bir aday, kullanıcının favorilerinden kaçının TMDB
-        önerilerinde ortak çıktıysa, o kadar güçlü bir "gerçek kullanıcı
-        davranışı" desteği alır ve nihai skoru buna göre yukarı çekilir.
-        Bu, TMDB'nin milyonlarca kullanıcısının izleme davranışından
-        beslenen gerçek bir collaborative filtering sinyali — bizim kendi
-        metin benzerliğimizden çok daha güvenilir.
-
         Args:
             favorites: Kullanıcının favori içerikleri
             candidate_pool: Öneri havuzu (filtrelenmiş içerikler)
             top_n: Döndürülecek öneri sayısı
-            collab_scores: {content_id: kaç favoride ortak çıktığı} sözlüğü
 
         Returns:
             Benzerlik skoruna göre sıralanmış içerik listesi
         """
         if not favorites or not candidate_pool:
             return []
-
-        collab_scores = collab_scores or {}
 
         # Favori ID'lerini al (önerilerde göstermemek için)
         favorite_ids = {fav.get("id") for fav in favorites}
@@ -159,15 +147,7 @@ class RecommendationEngine:
             raw_scores = sim_matrix.max(axis=1)
 
             for i, candidate in enumerate(valid_candidates):
-                text_score = float(raw_scores[i])
-                collab_count = collab_scores.get(candidate.get("id"), 0)
-                # TMDB'nin collaborative sinyalini metin benzerliğine
-                # ekliyoruz — her ortak öneri +0.15 katkı, en fazla 3
-                # tanesiyle sınırlı (tek bir aşırı-popüler öğe her şeyi
-                # ele geçirmesin diye).
-                collab_boost = 0.15 * min(collab_count, 3)
-                candidate["similarity_score"] = text_score + collab_boost
-                candidate["_collab_count"] = collab_count
+                candidate["similarity_score"] = float(raw_scores[i])
 
             valid_candidates.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
             top_candidates = valid_candidates[:top_n]
