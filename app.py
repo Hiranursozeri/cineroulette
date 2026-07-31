@@ -1305,6 +1305,33 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
             valid = [g for g in url_genres.split(",") if g in GENRE_FILTERS]
             if valid:
                 st.session_state["genre_multiselect"] = valid
+    # Kullanıcı geri bildirimi: puan/yıl/süre kaydırıcıları sayfa
+    # yenilenince (F5) varsayılana dönüyordu — sadece ruh hali/tür
+    # seçimi URL'de tutuluyordu. Artık aynı mantık bu üçüne de uygulanıyor.
+    if "rating_range_slider" not in st.session_state:
+        url_rating = st.query_params.get("rating")
+        if url_rating and "-" in url_rating:
+            try:
+                lo, hi = url_rating.split("-")
+                st.session_state["rating_range_slider"] = (float(lo), float(hi))
+            except (ValueError, TypeError):
+                pass
+    if "year_range_slider" not in st.session_state:
+        url_year = st.query_params.get("year")
+        if url_year and "-" in url_year:
+            try:
+                lo, hi = url_year.split("-")
+                st.session_state["year_range_slider"] = (int(lo), int(hi))
+            except (ValueError, TypeError):
+                pass
+    if "runtime_range_slider" not in st.session_state:
+        url_runtime = st.query_params.get("runtime")
+        if url_runtime and "-" in url_runtime:
+            try:
+                lo, hi = url_runtime.split("-")
+                st.session_state["runtime_range_slider"] = (int(lo), int(hi))
+            except (ValueError, TypeError):
+                pass
 
     with st.sidebar:
         st.markdown('<div class="section-title">🎯 Filtreler</div>', unsafe_allow_html=True)
@@ -1377,7 +1404,7 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
             runtime_range = None
             random_mode = True
         else:
-            rating_range = st.slider("Puan aralığı", 0.0, 10.0, (6.0, 10.0), 0.5)
+            rating_range = st.slider("Puan aralığı", 0.0, 10.0, (6.0, 10.0), 0.5, key="rating_range_slider")
             current_year = datetime.date.today().year
             year_range = st.slider("Yapım yılı aralığı", 1950, current_year, (1990, current_year), key="year_range_slider")
             content_type = st.selectbox(
@@ -1387,10 +1414,19 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
             )
             runtime_range = None
             if content_type == "movie":
-                runtime_range = st.slider("Süre (dakika)", 0, 240, (0, 240), 10)
+                runtime_range = st.slider("Süre (dakika)", 0, 240, (0, 240), 10, key="runtime_range_slider")
             else:
                 st.caption("ℹ️ TMDB, dizilerde süre filtresini desteklemiyor.")
             random_mode = False
+
+            # Bu üç filtreyi de URL'ye yazıyoruz ki sayfa yenilense bile
+            # (F5) kaybolmasınlar.
+            st.query_params["rating"] = f"{rating_range[0]}-{rating_range[1]}"
+            st.query_params["year"] = f"{year_range[0]}-{year_range[1]}"
+            if runtime_range:
+                st.query_params["runtime"] = f"{runtime_range[0]}-{runtime_range[1]}"
+            elif "runtime" in st.query_params:
+                del st.query_params["runtime"]
 
     mood_genre_ids = get_mood_genre_ids(selected_moods)
     mood_keyword_ids = get_mood_keyword_ids(selected_moods)
