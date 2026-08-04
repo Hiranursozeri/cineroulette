@@ -566,7 +566,7 @@ def fetch_ai_recommendations(
     ml_engine: RecommendationEngine,
     favorites: list[dict],
     content_type: str,
-    year_range: tuple[int, int] = (1950, 2100),
+    year_range: tuple[int, int] = (1874, 2100),
 ) -> list[dict]:
     """AI tabanlı öneriler getir."""
     if not favorites:
@@ -1388,7 +1388,7 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
             fav_count = fav_manager.get_count()
             st.caption(f"❤️ {fav_count} favorin arasından seçim yapılacak.")
             rating_range = (0.0, 10.0)
-            year_range = (1950, datetime.date.today().year)
+            year_range = (1874, datetime.date.today().year)
             content_type = "movie"
             runtime_range = None
             random_mode = False
@@ -1400,13 +1400,13 @@ def render_home_tab(tmdb: TMDBClient, fav_manager: FavoritesManager, feedback_ma
                 format_func=lambda x: "🎥 Film" if x == "movie" else "📺 Dizi",
                 key="random_content_type",
             )
-            year_range = (1950, datetime.date.today().year)
+            year_range = (1874, datetime.date.today().year)
             runtime_range = None
             random_mode = True
         else:
             rating_range = st.slider("Puan aralığı", 0.0, 10.0, (6.0, 10.0), 0.5, key="rating_range_slider")
             current_year = datetime.date.today().year
-            year_range = st.slider("Yapım yılı aralığı", 1950, current_year, (1990, current_year), key="year_range_slider")
+            year_range = st.slider("Yapım yılı aralığı", 1874, current_year, (1990, current_year), key="year_range_slider")
             content_type = st.selectbox(
                 "İçerik türü",
                 options=["movie", "tv"],
@@ -1792,7 +1792,7 @@ def main():
             # de aynı aralığı uyguluyoruz. Favoriler/Rastgele modundaysa
             # (bu slider hiç render edilmemiş olabilir) makul bir varsayılana
             # (filtresiz: tüm yıllar) düşüyoruz.
-            ai_year_range = st.session_state.get("year_range_slider", (1950, datetime.date.today().year))
+            ai_year_range = st.session_state.get("year_range_slider", (1874, datetime.date.today().year))
             _render_ai_recommendations_section(tmdb, ml_engine, fav_manager, feedback_manager, favorites, ai_content_type, ai_year_range)
 
     with tab_favorites:
